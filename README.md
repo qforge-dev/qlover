@@ -98,11 +98,12 @@ is equivalent to a full run.
 Qlover partitions the gate instead of merging line counts:
 
 - A **baseline** file (`cover/.qlover_baseline`, Erlang term) records
-  a stable hash of every compiled beam (all chunks except the volatile
-  `ExCk` checker metadata, whose map encoding order varies across
-  identical rebuilds), a combined hash of the non-test gate inputs
-  (`priv/repo/`, `config/`, `mix.exs`, `mix.lock`), and per-test-file
-  content hashes plus the traced module reference graph.
+  a stable hash of every compiled beam (all chunks except `Dbgi`, `Docs`,
+  `CInf`, `ExCk`, and `Line`, which embed absolute paths, option snapshots,
+  or nondeterministic metadata — so identical sources hash equally in any
+  checkout, and pure line shifts need no fresh proof), a combined hash of
+  the non-test gate inputs (`priv/repo/`, `config/`, `mix.exs`, `mix.lock`),
+  and per-test-file content hashes plus the traced module reference graph.
 - After a green full run, `mix qlover --write-baseline` snapshots both.
 - On a later change, `mix qlover --eligible` passes only if the baseline
   exists and every gate input is byte-identical. Non-test input changes

@@ -167,11 +167,13 @@ byte-identical test files, so test edits fall back to full there.
 - Beam byte-stability across histories: on Elixir 1.20 with this
   codebase, identical sources rebuild to byte-different beams for some
   modules (observed 4–800 per rebuild, varying run to run). Root-caused to
-  the `ExCk` chunk (`{:elixir_checker_v8, ...}`): same decoded term,
-  different map-key encoding order. Qlover now hashes stable chunks only
-  (everything but `ExCk`), which collapsed a forced-rebuild diff from
-  hundreds to ~2 modules end-to-end. Any residual wobble only ever costs
-  a fresh 100% proof, never a false pass, per the contract.
+  path-embedding and nondeterministic chunks (`Dbgi` holds absolute source
+  paths, `Docs`/`CInf` snapshots, `ExCk` map ordering, `Line` filenames):
+  qlover hashes stable chunks only, which also makes identical sources hash
+  equally across different checkouts (pinned by test) and lets pure line
+  shifts pass without fresh proof (line numbers are labels; identical Code
+  means identical executable structure). Any residual wobble only ever
+  costs a fresh 100% proof, never a false pass, per the contract.
 
 ## Initial work
 
@@ -249,7 +251,7 @@ behavior, 15/15 tests green across seeds 0/42/12345/99999):
   needs parens before `|>` or the pipe binds outside the comprehension.
 - Phase 4 follow-ups from dogfooding labqoat (scratch clone at clean HEAD,
   isolated postgres on :5434 with its own volume/database, path
-  dependency): beam hashing now ignores the `ExCk` chunk (baseline v3;
+  dependency): beam hashing now ignores path-volatile chunks (baseline v3;
   forced-rebuild diff collapsed 462→2 modules end to end); expansion runs
   pass `--no-stale` (a host `test` alias injecting `--stale` otherwise
   intersects the explicit file list with a fresh manifest and silently runs

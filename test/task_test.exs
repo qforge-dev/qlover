@@ -235,7 +235,7 @@ defmodule Qlover.TaskTest do
     old_sha = file_sha!(dir, rel)
 
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{"t/attr_test.exs" => entry(old_sha, ["Elixir.QloverFixAttrM"])},
@@ -420,7 +420,7 @@ defmodule Qlover.TaskTest do
     old_sha = file_sha!(dir, rel)
 
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{rel => entry(old_sha, [Atom.to_string(mod_h)])},
@@ -444,7 +444,7 @@ defmodule Qlover.TaskTest do
     old_sha = file_sha!(dir, rel)
 
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{rel => entry(old_sha, [Atom.to_string(mod_h)])},
@@ -463,13 +463,101 @@ defmodule Qlover.TaskTest do
   end
 
   test "stable chunk hashing ignores volatile metadata" do
-    chunks = [{~c"Code", <<1, 2>>}, {~c"ExCk", <<3>>}, {~c"Docs", <<4>>}]
+    chunks = [
+      {~c"Code", <<1, 2>>},
+      {~c"ExCk", <<3>>},
+      {~c"Dbgi", <<4>>},
+      {~c"Docs", <<5>>},
+      {~c"CInf", <<6>>},
+      {~c"Line", <<7>>}
+    ]
 
-    assert Qlover.stable_chunks(chunks) == [{~c"Code", <<1, 2>>}, {~c"Docs", <<4>>}]
+    assert Qlover.stable_chunks(chunks) == [{~c"Code", <<1, 2>>}]
     assert Qlover.stable_chunks([]) == []
 
-    reordered = [{~c"Docs", <<4>>}, {~c"ExCk", <<9>>}, {~c"Code", <<1, 2>>}]
+    reordered = [{~c"CInf", <<9>>}, {~c"Code", <<1, 2>>}, {~c"Dbgi", <<8>>}]
     assert Qlover.stable_chunks(reordered) == Qlover.stable_chunks(chunks)
+  end
+
+  test "identical sources hash equally across directories", %{tmp_dir: dir} do
+    # Dbgi/Docs/CInf embed absolute source paths, so raw beam bytes always
+    # differ across checkouts. Stable hashing must not.
+    for sub <- ["worktree-a", "worktree-b"] do
+      File.mkdir_p!(Path.join([dir, sub, "ebin"]))
+    end
+
+    body = "  def a, do: :ok\n  def b(x), do: x * 2\n"
+
+    for sub <- ["worktree-a", "worktree-b"] do
+      subdir = Path.join(dir, sub)
+
+      File.write!(
+        Path.join(subdir, "Cross.ex"),
+        "defmodule Elixir.QloverFixCross do\n#{body}end\n"
+      )
+
+      previous = Code.compiler_options(debug_info: true, docs: true)
+
+      try do
+        {:ok, _, _} =
+          Kernel.ParallelCompiler.compile_to_path(
+            [Path.join(subdir, "Cross.ex")],
+            Path.join(subdir, "ebin"),
+            return_diagnostics: true
+          )
+      after
+        Code.compiler_options(previous)
+      end
+    end
+
+    beam_a = Path.join(dir, "worktree-a/ebin/Elixir.QloverFixCross.beam")
+    beam_b = Path.join(dir, "worktree-b/ebin/Elixir.QloverFixCross.beam")
+
+    # The property only means something if the raw bytes actually differ.
+    assert File.read!(beam_a) != File.read!(beam_b)
+
+    hashes_a = Qlover.beam_hashes(Path.join(dir, "worktree-a/ebin"))
+    hashes_b = Qlover.beam_hashes(Path.join(dir, "worktree-b/ebin"))
+
+    assert hashes_a == hashes_b
+  end
+
+  test "pure line shifts need no fresh proof", %{tmp_dir: dir} do
+    # Identical Code at shifted lines hashes equally: line numbers are
+    # labels, and an unchanged suite covers the same expressions.
+    for sub <- ["shift-a", "shift-b"] do
+      File.mkdir_p!(Path.join([dir, sub, "ebin"]))
+    end
+
+    bodies = %{
+      "shift-a" => "  def a, do: :ok\n",
+      "shift-b" => "\n\n\n  def a, do: :ok\n"
+    }
+
+    for {sub, body} <- bodies do
+      subdir = Path.join(dir, sub)
+
+      File.write!(
+        Path.join(subdir, "Shift.ex"),
+        "defmodule Elixir.QloverFixShift do\n#{body}end\n"
+      )
+
+      previous = Code.compiler_options(debug_info: true, docs: false)
+
+      try do
+        {:ok, _, _} =
+          Kernel.ParallelCompiler.compile_to_path(
+            [Path.join(subdir, "Shift.ex")],
+            Path.join(subdir, "ebin"),
+            return_diagnostics: true
+          )
+      after
+        Code.compiler_options(previous)
+      end
+    end
+
+    assert Qlover.beam_hashes(Path.join(dir, "shift-a/ebin")) ==
+             Qlover.beam_hashes(Path.join(dir, "shift-b/ebin"))
   end
 
   test "unreadable beams fall back to raw content hashes", %{tmp_dir: dir} do
@@ -482,37 +570,40 @@ defmodule Qlover.TaskTest do
              :crypto.hash(:sha256, "not-a-beam") |> Base.encode16(case: :lower)
   end
 
-  test "version 1 and 2 baselines are invalid", %{tmp_dir: dir} do
+  test "version 1 through 3 baselines are invalid", %{tmp_dir: dir} do
     opts = task_opts(dir)
     File.write!(opts[:baseline], :erlang.term_to_binary(%{vsn: 1, beams: %{}, gate: "x"}))
 
     assert_raise Mix.Error, ~r/invalid/, fn -> Qlover.run([], opts) end
 
-    File.write!(
-      opts[:baseline],
-      :erlang.term_to_binary(%{vsn: 2, beams: %{}, gate: "x", tests: %{}, librefs: %{}})
-    )
+    for vsn <- [2, 3] do
+      File.write!(
+        opts[:baseline],
+        :erlang.term_to_binary(%{vsn: vsn, beams: %{}, gate: "x", tests: %{}, librefs: %{}})
+      )
 
-    assert_raise Mix.Error, ~r/invalid/, fn -> Qlover.run([], opts) end
+      assert_raise Mix.Error, ~r/invalid/, fn -> Qlover.run([], opts) end
+    end
+
     assert_raise Mix.Error, ~r/invalid/, fn -> Qlover.run(["--eligible"], opts) end
   end
 
-  test "malformed version 3 baselines are invalid", %{tmp_dir: dir} do
+  test "malformed version 4 baselines are invalid", %{tmp_dir: dir} do
     opts = task_opts(dir)
 
     for bad <- [
-          %{vsn: 3, beams: %{}, gate: "x", tests: [], librefs: %{}},
-          %{vsn: 3, beams: %{}, gate: "x", tests: %{}, librefs: []},
-          %{vsn: 3, beams: %{}, gate: "x", tests: %{"t/a.exs" => %{modules: []}}, librefs: %{}},
+          %{vsn: 4, beams: %{}, gate: "x", tests: [], librefs: %{}},
+          %{vsn: 4, beams: %{}, gate: "x", tests: %{}, librefs: []},
+          %{vsn: 4, beams: %{}, gate: "x", tests: %{"t/a.exs" => %{modules: []}}, librefs: %{}},
           %{
-            vsn: 3,
+            vsn: 4,
             beams: %{},
             gate: "x",
             tests: %{"t/a.exs" => %{sha: "1", modules: ["Elixir.X", 42]}},
             librefs: %{}
           },
-          %{vsn: 3, beams: [], gate: "x", tests: %{}, librefs: %{}},
-          %{vsn: 3, beams: %{}, gate: :atom, tests: %{}, librefs: %{}}
+          %{vsn: 4, beams: [], gate: "x", tests: %{}, librefs: %{}},
+          %{vsn: 4, beams: %{}, gate: :atom, tests: %{}, librefs: %{}}
         ] do
       File.write!(opts[:baseline], :erlang.term_to_binary(bad))
       assert_raise Mix.Error, ~r/invalid/, fn -> Qlover.run([], opts) end
@@ -576,7 +667,7 @@ defmodule Qlover.TaskTest do
     sha = file_sha!(dir, rel)
 
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{rel => entry(sha, ["Elixir.QloverFixCarryM"])},
@@ -645,7 +736,7 @@ defmodule Qlover.TaskTest do
 
   defp write_baseline_v2(opts, tests) do
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: tests,
@@ -657,7 +748,7 @@ defmodule Qlover.TaskTest do
 
   defp write_baseline_v2_raw(opts, beams) do
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: beams,
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{},

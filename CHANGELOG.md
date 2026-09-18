@@ -15,12 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   focused expansion runs, and fresh-export union. Non-code fixture changes
   and tests without reference data still fall back to the full suite,
   fail-closed.
-- Baseline format v3 (non-test gate inputs, per-test-file hashes,
+- Baseline format v4 (non-test gate inputs, per-test-file hashes,
   reference snapshot, lib edge graph). Older baselines are treated as
   invalid and trigger one full re-baseline.
-- Beam hashing ignores the `ExCk` chunk (Elixir checker metadata whose map
-  encoding order varies across identical rebuilds); all other chunks stay
-  hashed, and unreadable beams fall back to raw content hashes.
+- Beam hashing ignores path-volatile chunks (`Dbgi`, `Docs`, `CInf`,
+  `ExCk`, `Line`): identical sources hash equally in any checkout and
+  pure line shifts need no fresh proof. Unreadable beams fall back to raw
+  content hashes.
 - `MIX_ENV=test` guard on both tasks (same rule as `mix test` itself),
   with `preferred_envs` setup documented for host projects.
 - Second scratch export (`--expansion-export`) for the focused expansion

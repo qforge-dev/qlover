@@ -260,7 +260,7 @@ defmodule Qlover.TestTaskTest do
     assert :ok = TestQlover.run([], Keyword.put(opts, :test_runner, runner))
 
     assert_received {:test_cmd, ["test", "--no-stale", "--cover"]}
-    assert %{vsn: 3} = :erlang.binary_to_term(File.read!(opts[:baseline]))
+    assert %{vsn: 4} = :erlang.binary_to_term(File.read!(opts[:baseline]))
   end
 
   test "attribution path runs stale plus focused expansion", %{tmp_dir: dir} do
@@ -271,7 +271,7 @@ defmodule Qlover.TestTaskTest do
     old_sha = file_sha!(dir, rel)
 
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{rel => %{sha: old_sha, modules: [Atom.to_string(mod)]}},
@@ -355,7 +355,7 @@ defmodule Qlover.TestTaskTest do
     old_sha = file_sha!(dir, rel)
 
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{
@@ -394,7 +394,7 @@ defmodule Qlover.TestTaskTest do
     old_sha = file_sha!(dir, rel)
 
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: %{rel => %{sha: old_sha, modules: [Atom.to_string(mod)]}},
@@ -461,7 +461,7 @@ defmodule Qlover.TestTaskTest do
 
   defp write_baseline_v2(opts, tests) do
     write_baseline_map!(opts, %{
-      vsn: 3,
+      vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
       gate: Qlover.gate_hash(opts[:gate_paths]),
       tests: tests,

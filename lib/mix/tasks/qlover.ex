@@ -58,7 +58,7 @@ defmodule Mix.Tasks.Qlover do
 
   alias Qlover.Attribution
 
-  @vsn 3
+  @vsn 4
   @baseline_default "cover/.qlover_baseline"
   @export_default "cover/.qlover_fresh.coverdata"
   @expansion_export_default "cover/.qlover_expansion.coverdata"
@@ -265,8 +265,20 @@ defmodule Mix.Tasks.Qlover do
 
   @doc false
   def stable_chunks(chunks) do
+    # Only cover-relevant chunks participate in change detection. Dbgi,
+    # Docs, CInf, ExCk, and Line embed absolute source paths, option
+    # snapshots, or nondeterministically ordered metadata, so identical
+    # sources built in different directories hash differently if they are
+    # included (this is what makes cross-worktree baseline sharing
+    # possible at all). Excluding them is sound: none affect execution,
+    # and line numbers are mere labels — identical Code means identical
+    # executable structure, so an unchanged suite covers it exactly as
+    # before (pure line shifts need no fresh proof). Any other volatile
+    # chunk merely costs a fresh 100% proof, never a false pass.
     chunks
-    |> Enum.reject(fn {name, _binary} -> name == ~c"ExCk" end)
+    |> Enum.reject(fn {name, _binary} ->
+      name in [~c"ExCk", ~c"Dbgi", ~c"Docs", ~c"CInf", ~c"Line"]
+    end)
     |> Enum.sort_by(fn {name, _binary} -> name end)
   end
 
