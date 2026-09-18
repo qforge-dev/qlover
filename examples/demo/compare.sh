@@ -7,9 +7,9 @@
 # For each scenario the script applies one small change, runs the full suite
 # (`mix test --no-stale --cover`, what you would run today for a coverage
 # claim) and then `mix test.qlover`, and prints both test counts plus the
-# verdict. Each scenario starts from the same green baseline: file tree,
-# qlover baseline, tracer refs, and the ExUnit stale manifest are
-# snapshotted beforehand and restored afterwards, so scenarios are
+# verdict. Each scenario starts from the same green baseline: the whole
+# project state (sources, baseline, tracer refs, compiled beams, manifests)
+# is snapshotted once as golden and restored afterwards, so scenarios are
 # independent and chainable in any order.
 #
 # Exit status is 0 when every scenario's verdicts agree (both pass or both
@@ -71,10 +71,10 @@ run_qlover() {
 
 run_scenario() {
   # $1 = id, $2 = description
-  # Mix compares mtimes at 1-second granularity: without this sleep a fast
-  # script edits files within the same second the manifests were written,
-  # and the change is invisible ("No stale tests"). Humans never hit this;
-  # scripts always must.
+  # Mix's own compiler detects recompilation by mtime at 1-second
+  # granularity: without this sleep a fast script edits files within the
+  # same second as the last compile, Mix skips the rebuild, and qlover
+  # hashes stale beams. Humans never hit this; scripts always must.
   sleep 2
   "setup_$1"
   # Qlover first: this is the order a real user runs. The full suite goes
@@ -266,23 +266,6 @@ end
 EOF
 }
 
-run_scenario() {
-  # $1 = id, $2 = description
-  # Mix compares mtimes at 1-second granularity: without this sleep a fast
-  # script edits files within the same second the manifests were written,
-  # and the change is invisible ("No stale tests"). Humans never hit this;
-  # scripts always must.
-  sleep 2
-  "setup_$1"
-  # Qlover first: this is the order a real user runs. The full suite goes
-  # second because even a no-op `mix test` compile can rewrite manifests
-  # and beams, which would pollute the incremental measurement.
-  run_qlover "$LOGS/qlover-$1.log"
-  run_full "$LOGS/full-$1.log"
-  row "$1" "$2"
-  restore_golden
-}
-
 printf 'Establishing green baseline (full suite + snapshot)...\n'
 rm -rf cover _build
 # shellcheck disable=SC2086
@@ -298,15 +281,16 @@ printf '|-%-14s-|-%-44s-|-%-10s-|-%-10s-|-%-5s-|\n' \
   "--------------" "--------------------------------------------" \
   "----------" "----------" "-----"
 
-# Warmup is a real one-time cost, shown honestly: the full baseline path
-# never writes ExUnit's stale manifest, so the first stale run executes
-# everything once to establish it. Afterwards the steady state (sources,
-# baseline, refs, beams, manifests) is snapshotted once as golden; every
-# scenario restores it, so scenarios are independent and order-free.
+# The steady state (sources, baseline, refs, beams, manifests) is
+# snapshotted once as golden; every scenario restores it, so scenarios are
+# independent and order-free. No warmup run is needed: file selection comes
+# from qlover's content-keyed reference graph, not from ExUnit's stale
+# manifest, so the first incremental after the baseline is already
+# selective.
 sleep 2
 run_full "$LOGS/full-warmup.log"
 run_qlover "$LOGS/qlover-warmup.log"
-row "warmup" "first stale run (establishes manifest)"
+row "cold" "first incremental after baseline"
 snap_golden
 
 run_scenario no_change "nothing changed"

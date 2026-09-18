@@ -196,9 +196,9 @@ defmodule Qlover.AttributionTest do
               %{prove: ["Elixir.H.beam"], run: ["test/a_test.exs"], test_changed: true}}
   end
 
-  test "plan skips expansion for pure lib changes" do
-    # The stale subset already covers every referencer (soundness
-    # contract), so a beam-only change needs proof but no second run.
+  test "plan selects referencers for pure lib changes" do
+    # No stale manifest is involved: test.qlover executes exactly the
+    # files listed here with --no-stale.
     assert Attribution.plan(%{
              beam_changed: ["Elixir.H.beam"],
              current_beams: %{"Elixir.H.beam" => "1", "Elixir.M.beam" => "1"},
@@ -212,7 +212,9 @@ defmodule Qlover.AttributionTest do
              fresh_lib_edges: %{},
              compiled_dirs: [],
              project_root: "/repo"
-           }) == {:incremental, %{prove: ["Elixir.H.beam"], run: [], test_changed: false}}
+           }) ==
+             {:incremental,
+              %{prove: ["Elixir.H.beam"], run: ["test/a_test.exs"], test_changed: false}}
   end
 
   test "plan expands surviving referencers of deleted modules" do

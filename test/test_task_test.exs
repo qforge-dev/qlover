@@ -79,7 +79,7 @@ defmodule Qlover.TestTaskTest do
     end
   end
 
-  test "stale path runs the subset and gates", %{tmp_dir: dir} do
+  test "unchanged tree gates without running tests", %{tmp_dir: dir} do
     compile_beam!(dir, "Same", "  def a, do: :ok\n")
     opts = task_opts(dir)
 
@@ -93,81 +93,82 @@ defmodule Qlover.TestTaskTest do
 
     assert :ok = TestQlover.run(["test/foo_test.exs"], Keyword.put(opts, :test_runner, runner))
 
-    assert_received {:test_cmd, cmd}
-
-    assert cmd == [
-             "test",
-             "--stale",
-             "--cover",
-             "--export-coverage",
-             "fresh",
-             "test/foo_test.exs"
-           ]
+    # Nothing changed, so there is nothing to run — not even an
+    # explicitly requested file. User args only ever widen the run.
+    refute_received {:test_cmd, _}
 
     assert File.read!(opts[:baseline]) == baseline_bytes
     refute File.exists?(opts[:export_path])
   end
 
-  test "stale run failure aborts before gating", %{tmp_dir: dir} do
+  test "focused run failure aborts before gating", %{tmp_dir: dir} do
     compile_beam!(dir, "Same", "  def a, do: :ok\n")
     opts = task_opts(dir)
 
     assert :ok = Qlover.run(["--write-baseline"], opts)
     baseline_bytes = File.read!(opts[:baseline])
 
-    assert_raise Mix.Error, ~r/failed.*exit 2/, fn ->
-      TestQlover.run([], Keyword.put(opts, :test_runner, fn _cmd -> 2 end))
+    rel = write_test!(dir, "added_test.exs", "# brand new\n")
+
+    runner = fn cmd ->
+      send(self(), {:test_cmd, cmd})
+      2
     end
+
+    assert_raise Mix.Error, ~r/failed.*exit 2/, fn ->
+      TestQlover.run([], Keyword.put(opts, :test_runner, runner))
+    end
+
+    assert_received {:test_cmd,
+                     ["test", "--no-stale", "--cover", "--export-coverage", "fresh", ^rel]}
 
     assert File.read!(opts[:baseline]) == baseline_bytes
   end
 
-  test "changed beams without an export fail closed", %{tmp_dir: dir} do
+  test "changed beams without runnable referencers fail closed", %{tmp_dir: dir} do
     compile_beam!(dir, "Changed", "  def a, do: :ok\n")
     opts = task_opts(dir)
 
     assert :ok = Qlover.run(["--write-baseline"], opts)
     compile_beam!(dir, "ChangedV2", "  def a, do: :ok\n  def b, do: :ok\n")
 
-    assert_raise Mix.Error, ~r/cannot import/, fn ->
-      TestQlover.run([], Keyword.put(opts, :test_runner, fn _cmd -> 0 end))
-    end
-  end
+    me = self()
 
-  test "changed beams with fresh coverage pass and clean up", %{tmp_dir: dir} do
-    compile_beam!(dir, "Pass", "  def a, do: :ok\n")
-    opts = task_opts(dir)
-
-    assert :ok = Qlover.run(["--write-baseline"], opts)
-
-    {module, beam} = compile_beam!(dir, "PassV2", "  def a, do: :ok\n  def b, do: :ok\n")
-    export_path = opts[:export_path]
-
-    # The stub runner stands in for `mix test --stale --cover
-    # --export-coverage`, which produces the export after qlover removes
-    # any leftover from a killed run.
-    runner = fn _cmd ->
-      fresh_export!(beam, export_path, module, [:a, :b])
+    runner = fn cmd ->
+      send(me, {:test_cmd, cmd})
       0
     end
 
-    assert :ok = TestQlover.run([], Keyword.put(opts, :test_runner, runner))
-    assert File.regular?(Path.join(opts[:output], "#{module}.html"))
-    refute File.exists?(opts[:export_path])
+    # No test file references the changed beam, so nothing runs and the
+    # gate fails for lack of fresh proof instead of guessing.
+    assert_raise Mix.Error, ~r/cannot import/, fn ->
+      TestQlover.run([], Keyword.put(opts, :test_runner, runner))
+    end
+
+    refute_received {:test_cmd, _}
   end
 
-  test "pure lib changes skip the expansion run", %{tmp_dir: dir} do
-    compile_beam!(dir, "Skip", "  def a, do: :ok\n")
+  test "explicit selection runs referencers once, never stale", %{tmp_dir: dir} do
+    compile_beam!(dir, "Pass", "  def a, do: :ok\n")
     opts = task_opts(dir)
+    rel = write_test!(dir, "pass_test.exs", "# v1\n")
+    old_sha = file_sha!(dir, rel)
 
-    assert :ok = Qlover.run(["--write-baseline"], opts)
+    {module, _beam} = compile_beam!(dir, "PassRef", "  def a, do: :ok\n  def b, do: :ok\n")
+    mod_string = Atom.to_string(module)
 
-    {module, beam} = compile_beam!(dir, "SkipV2", "  def a, do: :ok\n  def b, do: :ok\n")
+    write_baseline_map!(opts, %{
+      vsn: 4,
+      beams: Qlover.beam_hashes(opts[:compile_path]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
+      tests: %{rel => %{sha: old_sha, modules: [mod_string]}},
+      librefs: %{}
+    })
+
+    {^module, beam} = compile_beam!(dir, "PassRef", "  def a, do: :okay\n  def b, do: :ok\n")
     export_path = opts[:export_path]
     me = self()
 
-    # Only the stale call may happen: no test files changed, so there is
-    # nothing an expansion run could add beyond the stale subset.
     runner = fn cmd ->
       send(me, {:test_cmd, cmd})
       fresh_export!(beam, export_path, module, [:a, :b])
@@ -175,8 +176,12 @@ defmodule Qlover.TestTaskTest do
     end
 
     assert :ok = TestQlover.run([], Keyword.put(opts, :test_runner, runner))
-    assert_received {:test_cmd, ["test", "--stale" | _]}
+
+    assert_received {:test_cmd, cmd}
+    assert cmd == ["test", "--no-stale", "--cover", "--export-coverage", "fresh", rel]
     refute_received {:test_cmd, _}
+
+    assert File.regular?(Path.join(opts[:output], "#{module}.html"))
     refute File.exists?(opts[:export_path])
   end
 
@@ -223,23 +228,38 @@ defmodule Qlover.TestTaskTest do
   end
 
   test "custom export paths derive the export name", %{tmp_dir: dir} do
-    compile_beam!(dir, "Same", "  def a, do: :ok\n")
+    {mod, beam} = compile_beam!(dir, "Same", "  def a, do: :ok\n")
     opts = task_opts(dir)
+    rel = write_test!(dir, "same_test.exs", "# v1\n")
+    old_sha = file_sha!(dir, rel)
 
-    assert :ok = Qlover.run(["--write-baseline"], opts)
+    write_baseline_map!(opts, %{
+      vsn: 4,
+      beams: Qlover.beam_hashes(opts[:compile_path]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
+      tests: %{rel => %{sha: old_sha, modules: ["Elixir.QloverFixSame"]}},
+      librefs: %{}
+    })
+
+    write_test!(dir, "same_test.exs", "# v2\n")
 
     custom = Path.join(dir, "custom.coverdata")
     opts = Keyword.put(opts, :export_path, custom)
 
     runner = fn cmd ->
       send(self(), {:test_cmd, cmd})
+      fresh_export!(beam, custom, mod, [:a])
       0
     end
 
+    # The Same beam is unchanged but the edited test re-proves it, so the
+    # selection still runs the changed file once under the custom name.
     assert :ok = TestQlover.run(["--export", custom], Keyword.put(opts, :test_runner, runner))
 
     assert_received {:test_cmd, cmd}
-    assert ["test", "--stale", "--cover", "--export-coverage", "custom"] = cmd
+    assert ["test", "--no-stale", "--cover", "--export-coverage", "custom", ^rel] = cmd
+    refute_received {:test_cmd, _}
+    refute File.exists?(custom)
   end
 
   test "default runner shells out and reports exit codes" do
@@ -263,10 +283,9 @@ defmodule Qlover.TestTaskTest do
     assert %{vsn: 4} = :erlang.binary_to_term(File.read!(opts[:baseline]))
   end
 
-  test "attribution path runs stale plus focused expansion", %{tmp_dir: dir} do
+  test "focused run covers stale and expansion in one call", %{tmp_dir: dir} do
     {mod, beam} = compile_beam!(dir, "OrchM", "  def a, do: :ok\n  def b, do: :ok\n")
     opts = task_opts(dir)
-    expansion = Path.join(dir, "exp.coverdata")
     rel = write_test!(dir, "orch_test.exs", "# v1\n")
     old_sha = file_sha!(dir, rel)
 
@@ -279,33 +298,64 @@ defmodule Qlover.TestTaskTest do
     })
 
     write_test!(dir, "orch_test.exs", "# v2\n")
+    me = self()
 
-    runner = fn
-      ["test", "--stale", "--cover", "--export-coverage", _name] ->
-        send(self(), :stale_ran)
-        fresh_export!(beam, opts[:export_path], mod, [:a])
-        0
-
-      ["test", "--no-stale", "--cover", "--export-coverage", "exp" | files] ->
-        send(self(), {:expansion_cmd, files})
-        fresh_export!(beam, expansion, mod, [:b])
-        0
+    runner = fn cmd ->
+      send(me, {:test_cmd, cmd})
+      fresh_export!(beam, opts[:export_path], mod, [:a, :b])
+      0
     end
 
-    assert :ok =
-             TestQlover.run(
-               ["--expansion-export", expansion],
-               Keyword.put(opts, :test_runner, runner)
-             )
+    assert :ok = TestQlover.run([], Keyword.put(opts, :test_runner, runner))
 
-    assert_received :stale_ran
-    assert_received {:expansion_cmd, [^rel]}
+    assert_received {:test_cmd, cmd}
+    assert cmd == ["test", "--no-stale", "--cover", "--export-coverage", "fresh", rel]
+    refute_received {:test_cmd, _}
     refute File.exists?(opts[:export_path])
-    refute File.exists?(expansion)
+    refute File.exists?(opts[:expansion_export_path])
     assert File.regular?(Path.join(opts[:output], "#{mod}.html"))
 
     snapshot = :erlang.binary_to_term(File.read!(opts[:baseline]))
     assert snapshot.tests[rel].sha == file_sha!(dir, rel)
+  end
+
+  test "user file args widen the selection", %{tmp_dir: dir} do
+    {mod, beam} = compile_beam!(dir, "WideM", "  def a, do: :ok\n  def b, do: :ok\n")
+    opts = task_opts(dir)
+    rel = write_test!(dir, "wide_test.exs", "# v1\n")
+    old_sha = file_sha!(dir, rel)
+
+    write_baseline_map!(opts, %{
+      vsn: 4,
+      beams: Qlover.beam_hashes(opts[:compile_path]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
+      tests: %{rel => %{sha: old_sha, modules: [Atom.to_string(mod)]}},
+      librefs: %{}
+    })
+
+    write_test!(dir, "wide_test.exs", "# v2\n")
+    me = self()
+
+    runner = fn cmd ->
+      send(me, {:test_cmd, cmd})
+      2
+    end
+
+    assert_raise Mix.Error, ~r/failed.*exit 2/, fn ->
+      TestQlover.run(["test/extra_test.exs"], Keyword.put(opts, :test_runner, runner))
+    end
+
+    assert_received {:test_cmd, cmd}
+
+    assert cmd == [
+             "test",
+             "--no-stale",
+             "--cover",
+             "--export-coverage",
+             "fresh",
+             rel,
+             "test/extra_test.exs"
+           ]
   end
 
   test "attribution path falls back to full on fixture changes", %{tmp_dir: dir} do
@@ -345,7 +395,7 @@ defmodule Qlover.TestTaskTest do
     assert_received {:test_cmd, ["test", "--no-stale", "--cover"]}
   end
 
-  test "expansion never runs compiled support files", %{tmp_dir: dir} do
+  test "explicit selection skips compiled support files", %{tmp_dir: dir} do
     {mod, beam} = compile_beam!(dir, "SupM", "  def a, do: :ok\n  def b, do: :ok\n")
     opts = task_opts(dir)
     opts = Keyword.put(opts, :elixirc_paths, [Path.join(dir, "sup")])
@@ -366,28 +416,24 @@ defmodule Qlover.TestTaskTest do
     })
 
     write_test!(dir, "sup_test.exs", "# v2\n")
+    me = self()
 
-    runner = fn
-      ["test", "--stale", "--cover", "--export-coverage", _name] ->
-        send(self(), :stale_ran)
-        fresh_export!(beam, opts[:export_path], mod, [:a])
-        0
-
-      ["test", "--no-stale", "--cover", "--export-coverage", _name | files] ->
-        send(self(), {:expansion_cmd, files})
-        fresh_export!(beam, opts[:expansion_export_path], mod, [:b])
-        0
+    runner = fn cmd ->
+      send(me, {:test_cmd, cmd})
+      fresh_export!(beam, opts[:export_path], mod, [:a, :b])
+      0
     end
 
     assert :ok = TestQlover.run([], Keyword.put(opts, :test_runner, runner))
-    assert_received :stale_ran
-    assert_received {:expansion_cmd, files}
-    assert files == [rel]
+
+    assert_received {:test_cmd, cmd}
+    assert cmd == ["test", "--no-stale", "--cover", "--export-coverage", "fresh", rel]
+    refute_received {:test_cmd, _}
     refute File.exists?(opts[:export_path])
     refute File.exists?(opts[:expansion_export_path])
   end
 
-  test "attribution skips the expansion run when nothing can run", %{tmp_dir: dir} do
+  test "deleted tests with no runnable referencers fail without running", %{tmp_dir: dir} do
     {mod, _beam} = compile_beam!(dir, "OrchD", "  def a, do: :ok\n")
     opts = task_opts(dir)
     rel = write_test!(dir, "orchd_test.exs", "# doomed\n")
@@ -414,11 +460,10 @@ defmodule Qlover.TestTaskTest do
       TestQlover.run([], Keyword.put(opts, :test_runner, runner))
     end
 
-    assert_received {:test_cmd, _}
     refute_received {:test_cmd, _}
   end
 
-  test "expansion failure aborts before gating", %{tmp_dir: dir} do
+  test "explicit run failure aborts before gating", %{tmp_dir: dir} do
     {mod, beam} = compile_beam!(dir, "OrchX", "  def a, do: :ok\n  def b, do: :ok\n")
     opts = task_opts(dir)
     rel = write_test!(dir, "orchx_test.exs", "# v1\n")
@@ -428,21 +473,21 @@ defmodule Qlover.TestTaskTest do
       write_baseline_v2(opts, %{rel => %{sha: old_sha, modules: [Atom.to_string(mod)]}})
 
     write_test!(dir, "orchx_test.exs", "# v2\n")
+    me = self()
 
-    runner = fn
-      ["test", "--stale" | _] ->
-        fresh_export!(beam, opts[:export_path], mod, [:a, :b])
-        0
-
-      _expansion ->
-        2
+    runner = fn cmd ->
+      send(me, {:test_cmd, cmd})
+      2
     end
 
     assert_raise Mix.Error, ~r/failed.*exit 2/, fn ->
       TestQlover.run([], Keyword.put(opts, :test_runner, runner))
     end
 
+    assert_received {:test_cmd, _}
+    refute_received {:test_cmd, _}
     assert File.read!(opts[:baseline]) == baseline_before
+    _ = beam
   end
 
   defp write_test!(dir, name, body) do

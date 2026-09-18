@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code over instrumented code and zero their coverage).
 - `examples/demo`: runnable 48-test shop plus `compare.sh` measuring
   full-suite vs incremental across 11 scenarios (table in `README.md`);
-  exits non-zero on any verdict mismatch.
+  exits non-zero on any verdict mismatch. Now also carries a hostile
+  `test: ["test --stale"]` alias mirroring the labqoat convention, proving
+  qlover's explicit `--no-stale`-first argv cannot be shrunk by it.
 - Shared content-addressed cache (`QLOVER_CACHE_DIR`, default
   `~/.cache/qlover`): snapshots write through under content keys, missing
   baselines fetch and heal locally, tracer records merge across

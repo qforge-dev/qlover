@@ -9,17 +9,25 @@ defmodule Mix.Tasks.Test.Qlover do
   Plain `mix test` is left untouched, so single-file runs and ad-hoc flags
   keep working exactly as before. `mix test.qlover` decides by itself:
 
-    * Baseline exists and gate inputs (`test/`, `priv/repo/`, `config/`,
-      `mix.exs`, `mix.lock`) are unchanged: runs the stale subset with
-      coverage, then gates (`mix test --stale --cover --export-coverage
-      .qlover_fresh` + `mix qlover`).
-    * Otherwise — first run, missing/invalid baseline, or changed gate
-      inputs — runs the full suite with coverage and snapshots a new
-      baseline (`mix test --no-stale --cover` + `mix qlover
+    * Baseline exists and non-test gate inputs (`priv/repo/`, `config/`,
+      `mix.exs`, `mix.lock`) match: runs exactly the affected test files
+      with coverage, then gates (`mix test --no-stale <files> --cover
+      --export-coverage .qlover_fresh` + `mix qlover`). Test-only edits
+      stay incremental through per-test attribution.
+    * Otherwise — first run, missing/invalid baseline, or changed
+      non-test inputs — runs the full suite with coverage and snapshots a
+      new baseline (`mix test --no-stale --cover` + `mix qlover
       --write-baseline`). An info message says which path was taken.
 
-  Extra arguments are passed through to the underlying `mix test`
-  invocations (`mix test.qlover --seed 0`). The flags `--stale`,
+  There is no stale manifest involved: the file list comes from qlover's
+  own content-keyed reference graph, so selection is deterministic across
+  worktrees and machines, and a hostile host `test` alias injecting
+  `--stale` cannot shrink it (`--no-stale` is passed first, which wins the
+  duplicate-flag resolution).
+
+  Extra arguments are appended to the selection (`mix test.qlover --seed
+  0`); extra *file* arguments widen it, which stays sound because all
+  coverage still comes from one code version. The flags `--stale`,
   `--no-stale`, `--cover`, `--no-cover`, `--export-coverage`, `--failed`,
   `--partitions`, `--dry-run`, `--no-compile` are managed by the task and
   rejected when passed explicitly.
@@ -30,19 +38,15 @@ defmodule Mix.Tasks.Test.Qlover do
     * `--export PATH` - scratch export (default:
       `cover/.qlover_fresh.coverdata`); custom paths must live under the
       `test_coverage` output dir with a `.coverdata` suffix.
-    * `--expansion-export PATH` - second scratch export for the focused
-      expansion run (default: `cover/.qlover_expansion.coverdata`).
+    * `--expansion-export PATH` - second scratch export accepted by the
+      gate (default: `cover/.qlover_expansion.coverdata`).
 
   Test failures abort before gating and never update the baseline. Scratch
   exports are deleted after gating (and any leftovers removed before each
   run), so a later `mix test.coverage` never unions a stale partial into a
   full report. When test files change but reference data is available, only
-  the affected tests rerun in a focused expansion run instead of the full
-  suite (see `Mix.Tasks.Qlover`). The expansion passes `--no-stale` so a
-  host `test` alias injecting `--stale` cannot silently empty its explicit
-  file list, and skips files under `elixirc_paths` (compiled support files
-  must never be re-required: that would reload plain code over instrumented
-  code and zero their coverage).
+  the affected tests rerun in the focused run instead of the full
+  suite (see `Mix.Tasks.Qlover`).
 
   ## The `--qlover` flag spelling
 
@@ -101,24 +105,16 @@ defmodule Mix.Tasks.Test.Qlover do
     _ = File.rm(settings.export_path)
     _ = File.rm(settings.expansion_export_path)
 
-    if Qlover.eligible?(settings) do
-      Mix.shell().info("Qlover: gate inputs unchanged, running stale subset...")
+    Mix.Task.run("compile")
 
-      run_tests!(
-        runner,
-        ["--stale", "--cover", "--export-coverage", export_name(settings.export_path)] ++
-          test_args
-      )
+    case Qlover.load_baseline(settings) do
+      :error ->
+        Mix.shell().info(first_run_message(settings))
+        run_tests!(runner, ["--no-stale", "--cover"] ++ test_args)
+        Qlover.write_baseline!(settings)
 
-      try do
-        Qlover.gate!(settings)
-      after
-        _ = File.rm(settings.export_path)
-        _ = File.rm(settings.expansion_export_path)
-      end
-    else
-      Mix.Task.run("compile")
-      run_full_or_attributed!(settings, runner, test_args)
+      {:ok, baseline} ->
+        run_incremental_or_full!(settings, runner, test_args, baseline)
     end
   end
 
@@ -182,20 +178,8 @@ defmodule Mix.Tasks.Test.Qlover do
     Path.basename(path, ".coverdata")
   end
 
-  defp run_full_or_attributed!(settings, runner, test_args) do
-    case read_baseline_for_plan(settings) do
-      {:ok, baseline} ->
-        run_attributed_or_full!(settings, runner, test_args, baseline)
-
-      :error ->
-        Mix.shell().info(first_run_message(settings))
-        run_tests!(runner, ["--no-stale", "--cover"] ++ test_args)
-        Qlover.write_baseline!(settings)
-    end
-  end
-
-  defp run_attributed_or_full!(settings, runner, test_args, baseline) do
-    if baseline.gate != Qlover.gate_hash(settings.gate_paths) do
+  defp run_incremental_or_full!(settings, runner, test_args, baseline) do
+    if baseline.gate != Qlover.gate_hash(settings.gate_paths, settings.project_root) do
       Mix.shell().info(first_run_message(settings))
       run_tests!(runner, ["--no-stale", "--cover"] ++ test_args)
       Qlover.write_baseline!(settings)
@@ -208,51 +192,53 @@ defmodule Mix.Tasks.Test.Qlover do
           run_tests!(runner, ["--no-stale", "--cover"] ++ test_args)
           Qlover.write_baseline!(settings)
 
-        {:incremental, %{run: run}} ->
-          Mix.shell().info(
-            "Qlover: test changes detected, running stale subset with focused expansion..."
-          )
-
-          run_tests!(
-            runner,
-            ["--stale", "--cover", "--export-coverage", export_name(settings.export_path)] ++
-              test_args
-          )
-
-          if run != [] do
-            # NOTE: --no-stale is load-bearing here, not just cosmetic.
-            # Host projects often alias `test` with `--stale` injected
-            # (e.g. `test: [..., "test --stale"]`), which would intersect
-            # our explicit file list with the (possibly fresh) stale
-            # manifest and silently run nothing. Appending `--no-stale`
-            # wins the duplicate-flag resolution and makes the explicit
-            # selection unconditional.
-            run_tests!(
-              runner,
-              [
-                "--no-stale",
-                "--cover",
-                "--export-coverage",
-                export_name(settings.expansion_export_path)
-              ] ++
-                run ++ test_args
-            )
-          end
-
-          try do
-            Qlover.gate!(settings)
-          after
-            _ = File.rm(settings.export_path)
-            _ = File.rm(settings.expansion_export_path)
-          end
+        {:incremental, %{prove: prove, run: run}} ->
+          run_focused!(settings, runner, test_args, prove, run)
       end
     end
   end
 
-  defp read_baseline_for_plan(settings) do
-    {:ok, Qlover.read_baseline!(settings.baseline)}
-  rescue
-    Mix.Error -> :error
+  defp run_focused!(settings, runner, test_args, prove, run) do
+    cond do
+      run != [] ->
+        Mix.shell().info("Qlover: running #{length(run)} focused test file(s) with coverage...")
+
+      prove == [] ->
+        Mix.shell().info("Qlover: nothing to re-run; gating on the baseline...")
+
+      true ->
+        Mix.shell().info(
+          "Qlover: #{length(prove)} module(s) need fresh proof but no tests reference them..."
+        )
+    end
+
+    if run != [] do
+      # NOTE: --no-stale is load-bearing here, not just cosmetic.
+      # Host projects often alias `test` with `--stale` injected
+      # (e.g. `test: [..., "test --stale"]`); without our own --no-stale
+      # first, the alias would intersect our explicit file list with the
+      # (possibly fresh) stale manifest and silently run nothing.
+      # Appending `--no-stale` wins the duplicate-flag resolution and makes
+      # the explicit selection unconditional. User file arguments are
+      # appended after the selection: they can only widen the run, which
+      # stays sound because all coverage comes from one code version.
+      run_tests!(
+        runner,
+        [
+          "--no-stale",
+          "--cover",
+          "--export-coverage",
+          export_name(settings.export_path)
+        ] ++ run ++ test_args
+      )
+    end
+
+    try do
+      Qlover.gate!(settings)
+    after
+      _ = File.rm(settings.export_path)
+      _ = File.rm(settings.expansion_export_path)
+    end
   end
 
   defp attribution_fallback_message(:test_fixtures) do

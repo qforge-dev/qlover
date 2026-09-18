@@ -33,4 +33,7 @@ restored afterwards), and the script exits 1 if any verdicts disagree.
 tracer on `elixirc_options` + `test_elixirc_options` (scoped to
 `Mix.env() == :test`, since the tracer module only exists in `:test`),
 `test_coverage: [summary: [threshold: 100]]`, and `preferred_envs` for
-both tasks.
+both tasks. It also carries a hostile `test: ["test --stale"]` alias
+mirroring the labqoat convention: qlover always passes explicit
+`--no-stale`-first argv, so the alias can never shrink its selection,
+and every scenario above exercises that path.

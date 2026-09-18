@@ -20,6 +20,13 @@ defmodule Demo.MixProject do
     [preferred_envs: [qlover: :test, "test.qlover": :test]]
   end
 
+  # Mirrors the labqoat convention where bare `mix test` is stale-flavored.
+  # Qlover always passes explicit `--no-stale`-first argv so this alias can
+  # never shrink its selection.
+  defp aliases do
+    [test: ["test --stale"]]
+  end
+
   # The tracer module only exists in :test (qlover is a test-only dep),
   # so only trace there. In dev/prod the list is empty and compilation
   # is untouched.

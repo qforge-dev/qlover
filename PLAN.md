@@ -81,16 +81,17 @@ Partition the gate; never merge line counts across code versions.
 mix qlover --eligible ── no ──▶ mix test --no-stale --cover ──▶ mix qlover --write-baseline
         │ yes                                                              (baseline)
         ▼
-mix test --stale --cover --export-coverage .qlover_fresh ──▶ mix qlover ──▶ pass + new baseline
-        (tests must pass first)                              (changed beams 100%? else fail)
+mix test --no-stale <affected files> --cover ──▶ mix qlover ──▶ pass + new baseline
+--export-coverage .qlover_fresh                (affected beams 100%? else fail)
+(tests must pass first)
 ```
 
-`mix test.qlover` owns a third path between those two: when only test
-files changed and reference data is available, it runs the stale subset
-plus a focused expansion run (`mix test <affected files> --cover
---export-coverage .qlover_expansion`) and gates the union. The manual
-three-step flow stays conservative: `--eligible` still requires
-byte-identical test files, so test edits fall back to full there.
+`mix test.qlover` runs the whole flow in one command: load baseline
+(local, else shared cache) → plan the affected files → full suite or one
+focused `mix test --no-stale` run → gate. The manual three-step flow
+above stays conservative: `--eligible` still requires byte-identical test
+files and its stale run still uses ExUnit's manifest, so test edits fall
+back to full there.
 
 - `Mix.Tasks.Qlover`: the whole mechanism. Modes: `--eligible` (fast,
   no compilation, no cover), `--write-baseline` (snapshot after full),
@@ -118,9 +119,14 @@ byte-identical test files, so test edits fall back to full there.
 
 ## Soundness contract
 
-- Trusts `--stale` completeness: every test referencing a changed beam
-  reruns. The gate re-derives "changed" from beam hashes independently of
-  the stale manifest, so manifest timing cannot fool it.
+- File selection is qlover's own: changed test files plus every runnable
+  file referencing an affected module, derived from content-keyed
+  references (baseline-pinned for unchanged files). No stale manifest is
+  consulted, so selection is deterministic across worktrees and machines.
+  A test covers a module only by referencing it; dynamically dispatched
+  coverage is the one documented residual (see below).
+- The gate re-derives "changed" from beam hashes at gate time, so nothing
+  about run timing or ordering can fool it.
 - Changed beams are judged on fresh data only; baseline line data for them
   is discarded (never imported), so shifted line numbers cannot leak.
 - Unchanged beams are trusted only together with byte-identical
@@ -132,13 +138,13 @@ byte-identical test files, so test edits fall back to full there.
 - Fresh-export union is sound only within one code version: the gate never
   imports the baseline export, and all fresh exports come from runs of the
   current tree, so identical beams mean identical line numbers.
-- Tracer completeness is a trust assumption in the same class as `--stale`
-  completeness: dynamically dispatched calls, protocol implementations
-  (covered without naming their modules), and externals outside `test/`
-  that are not gate inputs are invisible to static references. Gaps degrade
-  to full fallbacks or fail-closed rejections, never to passes — except a
-  changed test silently dropping dynamically-dispatched coverage, the one
-  documented residual, which is why the assumption is stated, not hidden.
+- Tracer completeness is a trust assumption: dynamically dispatched
+  calls, protocol implementations (covered without naming their modules),
+  and externals outside `test/` that are not gate inputs are invisible to
+  static references. Gaps degrade to full fallbacks or fail-closed
+  rejections, never to passes — except a changed test silently dropping
+  dynamically-dispatched coverage, the one documented residual, which is
+  why the assumption is stated, not hidden.
 - Fail-closed: missing/invalid baseline, missing export with pending
   changes, unattributable test changes, fixture changes, per-module
   cover-compile errors, and unanalysable modules all raise instead of
@@ -153,9 +159,10 @@ byte-identical test files, so test edits fall back to full there.
   ignores the consolidation swap upstream performs. Correct for counting
   (the instrumented beam is what gets loaded) but unproven on a
   protocol-heavy suite — phase 3 must confirm.
-- ExUnit `--stale` manifest staleness vs beam hashes: hashes subsume mtime
-  logic for compiled code; externals outside `test/` are not tracked and
-  fall back to full only if they live under gate inputs.
+- ExUnit `--stale` manifests are no longer consulted by `mix test.qlover`
+  (explicit selection replaced them); the manual `--eligible` flow still
+  uses them. Externals outside `test/` are not tracked and fall back to
+  full only if they live under gate inputs.
 - `mix test.coverage` interplay: qlover scratch files must never linger in
   `cover/`; the task deletes the exports after gating and removes leftovers
   before each run, with `mix test.qlover` owning the full flow.
@@ -262,10 +269,15 @@ behavior, 15/15 tests green across seeds 0/42/12345/99999):
   covered lib change passes, uncovered lib change fails naming the module
   with full-run red agreement, comment-only test edit gates incrementally,
   deleted sole-covering test fails naming it with full-run red agreement,
-  new/support files pass, config changes fall back to full. One transient
-  "No stale tests" on a real lib change was observed once, fail-closed,
-  never reproduced since; out-of-band test runs desyncing ExUnit's
-  manifest from the baseline remain the known trigger class.
+  new/support files pass, config changes fall back to full.
+- Explicit file selection replaces `mix test --stale` inside
+  `mix test.qlover` (prompted by the sharing work: manifests are
+  mtime-based and unshareable, while qlover's planner already computed the
+  exact set). One focused `mix test --no-stale <files>` run instead of
+  stale-plus-expansion: no manifest, no warmup runs, deterministic across
+  worktrees, hostile host aliases defeated by `--no-stale`-first argv.
+  The transient "No stale tests" failure class disappears with the
+  manifest. Demo table refreshed to single-run numbers.
 - Expansion matches referencers against beamed modules only: the baseline
   snapshot keeps tracer noise (`ExUnit.Case`, `Kernel`, `elixir_def`,
   …) that appears in every file, and matching against the raw set widened

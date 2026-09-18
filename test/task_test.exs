@@ -231,6 +231,30 @@ defmodule Qlover.TaskTest do
     end)
   end
 
+  test "resolves path overrides from flags and options", %{tmp_dir: dir} do
+    opts = task_opts(dir)
+
+    settings = Qlover.settings(opts, baseline: "b", export: "e", expansion_export: "x")
+    assert settings.baseline == "b"
+    assert settings.export_path == "e"
+    assert settings.expansion_export_path == "x"
+
+    settings = Qlover.settings(Keyword.delete(opts, :expansion_export_path), [])
+    assert settings.expansion_export_path == "cover/.qlover_expansion.coverdata"
+  end
+
+  test "gate hashes are stable and root-relative", %{tmp_dir: dir} do
+    gate_dir = Path.join(dir, "gate")
+    File.mkdir_p!(gate_dir)
+    File.write!(Path.join(gate_dir, "input.txt"), "v1")
+
+    assert Qlover.gate_hash([Path.join(dir, "gate")]) ==
+             Qlover.gate_hash([Path.join(dir, "gate")])
+
+    assert Qlover.gate_hash([Path.join(dir, "gate")], dir) !=
+             Qlover.gate_hash([Path.join(dir, "gate")], Path.join(dir, "sub"))
+  end
+
   test "resolves the default cache dir from the environment" do
     with_env("QLOVER_CACHE_DIR", nil, fn ->
       with_env("XDG_CACHE_HOME", nil, fn ->

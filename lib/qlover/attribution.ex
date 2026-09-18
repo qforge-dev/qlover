@@ -299,20 +299,17 @@ defmodule Qlover.Attribution do
 
         test_changed = Enum.any?(diff.added ++ diff.modified, &code_file?/1)
 
+        # The run set is the complete execution list: changed files plus
+        # every runnable referencer. There is no stale manifest involved —
+        # test.qlover executes exactly these files with --no-stale — so
+        # pure lib changes list their referencers here too.
         run =
-          if test_changed or deleted_mods != [] do
-            (Enum.filter(diff.added ++ diff.modified, &code_file?/1) ++
-               referencing_files(expand_mods, union_refs))
-            |> Enum.uniq()
-            |> Enum.sort()
-            |> Enum.filter(&Map.has_key?(current_tests, &1))
-            |> runnable_files(compiled_dirs, project_root)
-          else
-            # Pure lib change: the stale subset already covers every
-            # referencer (trusted by the soundness contract), so no
-            # expansion run is needed.
-            []
-          end
+          (Enum.filter(diff.added ++ diff.modified, &code_file?/1) ++
+             referencing_files(expand_mods, union_refs))
+          |> Enum.uniq()
+          |> Enum.sort()
+          |> Enum.filter(&Map.has_key?(current_tests, &1))
+          |> runnable_files(compiled_dirs, project_root)
 
         {:incremental, %{prove: prove, run: run, test_changed: test_changed}}
       end
