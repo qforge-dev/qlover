@@ -166,7 +166,7 @@ defmodule Mix.Tasks.Qlover do
 
     if baseline.gate == gate_hash(settings.gate_paths, settings.project_root) and
          test_identity?(baseline.tests, test_hashes(settings)) do
-      Mix.shell().info("Qlover is eligible: gate inputs unchanged.")
+      Mix.shell().info("qlover is eligible: gate inputs unchanged.")
       :ok
     else
       Mix.raise("qlover is not eligible: gate inputs changed; run full coverage")
@@ -491,7 +491,7 @@ defmodule Mix.Tasks.Qlover do
     prune_records!(settings, snapshot, current)
     _ = File.rm(settings.export_path)
     _ = File.rm(settings.expansion_export_path)
-    Mix.shell().info("Qlover holds for #{length(prove)} proven beam(s).")
+    Mix.shell().info("qlover holds for #{length(prove)} proven beam(s).")
     :ok
   end
 
@@ -607,7 +607,7 @@ defmodule Mix.Tasks.Qlover do
 
     if unknown != [] and concrete? do
       Mix.shell().info(
-        "Qlover has no reference data for #{length(unknown)} test file(s); " <>
+        "qlover has no reference data for #{length(unknown)} test file(s); " <>
           "test edits will fall back to full runs until a traced full run refreshes them. " <>
           "Enable Qlover.Tracer (see Mix.Tasks.Qlover docs) to keep attribution incremental."
       )

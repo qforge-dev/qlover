@@ -201,14 +201,14 @@ defmodule Mix.Tasks.Test.Qlover do
   defp run_focused!(settings, runner, test_args, prove, run) do
     cond do
       run != [] ->
-        Mix.shell().info("Qlover: running #{length(run)} focused test file(s) with coverage...")
+        Mix.shell().info("qlover: running #{length(run)} focused test file(s) with coverage...")
 
       prove == [] ->
-        Mix.shell().info("Qlover: nothing to re-run; gating on the baseline...")
+        Mix.shell().info("qlover: nothing to re-run; gating on the baseline...")
 
       true ->
         Mix.shell().info(
-          "Qlover: #{length(prove)} module(s) need fresh proof but no tests reference them..."
+          "qlover: #{length(prove)} module(s) need fresh proof but no tests reference them..."
         )
     end
 
@@ -242,11 +242,11 @@ defmodule Mix.Tasks.Test.Qlover do
   end
 
   defp attribution_fallback_message(:test_fixtures) do
-    "Qlover: test fixtures changed, running full suite..."
+    "qlover: test fixtures changed, running full suite..."
   end
 
   defp attribution_fallback_message(:unattributed) do
-    "Qlover: test changes need full attribution, running full suite..."
+    "qlover: test changes need full attribution, running full suite..."
   end
 
   defp run_tests!(runner, test_args) do
@@ -258,9 +258,9 @@ defmodule Mix.Tasks.Test.Qlover do
 
   defp first_run_message(settings) do
     if File.exists?(settings.baseline) do
-      "Qlover: baseline missing/invalid or gate inputs changed, running full suite..."
+      "qlover: baseline missing/invalid or gate inputs changed, running full suite..."
     else
-      "Qlover: no baseline yet (first run), running full suite to establish it..."
+      "qlover: no baseline yet (first run), running full suite to establish it..."
     end
   end
 end

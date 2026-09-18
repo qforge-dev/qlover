@@ -77,7 +77,7 @@ run_scenario() {
   # hashes stale beams. Humans never hit this; scripts always must.
   sleep 2
   "setup_$1"
-  # Qlover first: this is the order a real user runs. The full suite goes
+  # qlover first: this is the order a real user runs. The full suite goes
   # second because even a no-op `mix test` compile can rewrite manifests
   # and beams, which would pollute the incremental measurement.
   run_qlover "$LOGS/qlover-$1.log"

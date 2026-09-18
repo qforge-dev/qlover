@@ -1,14 +1,13 @@
-# Qlover
+# qlover
 
-Incremental line-coverage gating for ExUnit runs. Qlover lets a focused
+Incremental line-coverage gating for ExUnit runs. qlover lets a focused
 subset of tests satisfy a 100% coverage gate without rerunning the whole
 suite, by combining fresh coverage for everything that could have changed
 with a trusted baseline from the last green full run.
 
 Status: core gate task (`mix qlover`), single-command runner
 (`mix test.qlover`), per-test-file attribution, `cover.sh` wrapper, and Hex
-packaging are implemented and tested (109 tests, 100% line coverage). See
-`PLAN.md` for goals, architecture, and roadmap.
+packaging are implemented and tested (109 tests, 100% line coverage).
 
 ## Background: how Erlang `:cover` works
 
@@ -73,7 +72,7 @@ if *any* of its entries was hit.
 `--export-coverage NAME` (or `--partitions N`) skips the report and writes
 `cover/NAME.coverdata` instead; `mix test.coverage` cover-compiles, imports
 every `cover/*.coverdata`, and reports the union. This is the sanctioned
-"collect coverage over different runs" mechanism — and the one Qlover builds
+"collect coverage over different runs" mechanism — and the one qlover builds
 on. It works for Elixir unchanged because instrumentation happens at the
 Erlang abstract-code/BEAM level: Elixir modules carry the same `debug_info`
 with `.ex` line numbers.
@@ -89,13 +88,13 @@ already claimed 100%.
 
 What we want: *"this test run owns this coverage."* If the tests covering a
 module did not need to rerun, their coverage claim still stands; if they
-did rerun, the fresh numbers replace it. Qlover selects exactly the tests
+did rerun, the fresh numbers replace it. qlover selects exactly the tests
 that could cover changed code from its own content-keyed reference graph,
 so a focused run plus the baseline is equivalent to a full run.
 
 ## Design
 
-Qlover partitions the gate instead of merging line counts:
+qlover partitions the gate instead of merging line counts:
 
 - A **baseline** file (`cover/.qlover_baseline`, Erlang term) records
   a stable hash of every compiled beam (all chunks except `Dbgi`, `Docs`,
@@ -372,10 +371,10 @@ ones. The same layout works over remote storage; writers must be trusted
 - OTP `:cover` partitions (`--partitions`, `--export-coverage`,
   `mix test.coverage`): union of disjoint runs, no invalidation.
 - `mix-stale-coverage` (sibling experiment): compiler tracers build a
-  test-file→module reference graph for per-test-file attribution. Qlover's
+  test-file→module reference graph for per-test-file attribution. qlover's
   phase 4 adopts the same reference-graph idea but attributes whole runs
   instead of isolating per-file runs: one explicit `mix test --no-stale`
   invocation over exactly the affected files (same code version, so no
-  async interference to beat). Qlover's coarser beam-level partition
+  async interference to beat). qlover's coarser beam-level partition
   remains as the no-tracer fallback: without reference data, test edits
   fall back to full.

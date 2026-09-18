@@ -21,7 +21,7 @@ defmodule Demo.MixProject do
   end
 
   # Mirrors the labqoat convention where bare `mix test` is stale-flavored.
-  # Qlover always passes explicit `--no-stale`-first argv so this alias can
+  # qlover always passes explicit `--no-stale`-first argv so this alias can
   # never shrink its selection.
   defp aliases do
     [test: ["test --stale"]]
