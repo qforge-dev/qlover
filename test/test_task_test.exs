@@ -501,7 +501,10 @@ defmodule Qlover.TestTaskTest do
   end
 
   defp write_baseline_map!(opts, map) do
-    File.write!(opts[:baseline], :erlang.term_to_binary(map, [:compressed]))
+    File.write!(
+      opts[:baseline],
+      :erlang.term_to_binary(Map.put_new(map, :test_counts, %{}), [:compressed])
+    )
   end
 
   defp write_baseline_v2(opts, tests) do
@@ -530,6 +533,7 @@ defmodule Qlover.TestTaskTest do
       compile_path: beams,
       gate_paths: [gate_dir],
       test_paths: ["t"],
+      test_counts: %{},
       project_root: dir,
       refs_dir: Path.join(dir, "refs"),
       cache_dir: Path.join(dir, "cache"),

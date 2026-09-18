@@ -61,6 +61,19 @@ Measured in the [48-test demo](https://github.com/qforge-dev/qlover/tree/main/ex
 **The first run earns the baseline. Later runs reuse it.** The zero-test
 row is an unchanged rerun, not a free first run.
 
+Every `mix test.qlover` invocation reports the test work:
+
+```text
+qlover: ran 8 tests; didn't run 40 tests.
+```
+
+Counts include generated tests and doctests, and follow test additions and
+deletions. An unchanged rerun reports `ran 0 tests`; failed runs also print
+the summary. ExUnit skips and exclusions count as not run and are listed
+separately. Counts travel with the shared baseline; an older baseline needs
+one full run to learn them. If compilation or an interrupted run prevents
+counting, the summary labels unavailable counts as `unknown`.
+
 These are test-execution savings, not wall-clock speedup percentages.
 Startup, compilation, and coverage checks still take time; the time saved
 depends on how expensive your tests are. The animation illustrates these

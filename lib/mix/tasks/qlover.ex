@@ -132,7 +132,9 @@ defmodule Mix.Tasks.Qlover do
           Keyword.get(options, :expansion_export_path, @expansion_export_default),
       compile_path: Keyword.get(options, :compile_path, Mix.Project.compile_path()),
       gate_paths: Keyword.get(options, :gate_paths, @gate_roots),
-      test_paths: Keyword.get(options, :test_paths, @test_roots),
+      test_paths:
+        Keyword.get(options, :test_paths, Mix.Project.config()[:test_paths] || @test_roots),
+      test_counts: Keyword.get(options, :test_counts),
       elixirc_paths:
         Keyword.get(options, :elixirc_paths, Mix.Project.config()[:elixirc_paths] || ["lib"]),
       project_root: Keyword.get(options, :project_root, File.cwd!()),
@@ -517,7 +519,7 @@ defmodule Mix.Tasks.Qlover do
     changed_mods =
       prior_beams |> changed_beams(current) |> Enum.map(&Attribution.beam_module_string/1)
 
-    %{
+    snapshot = %{
       vsn: @vsn,
       beams: current,
       gate: gate,
@@ -529,6 +531,19 @@ defmodule Mix.Tasks.Qlover do
           changed_mods
         )
     }
+
+    # Counts are optional metadata, independent of the coverage proof. Keep
+    # them in the shared baseline so unchanged checkouts can report savings.
+    prior =
+      with {:ok, bytes} <- File.read(settings.baseline),
+           {:ok, baseline} <- decode_baseline(bytes) do
+        baseline
+      else
+        _ -> %{}
+      end
+
+    counts = settings.test_counts || Map.get(prior, :test_counts)
+    if counts, do: Map.put(snapshot, :test_counts, counts), else: snapshot
   end
 
   defp read_prior_baseline(settings) do
@@ -702,7 +717,8 @@ defmodule Mix.Tasks.Qlover do
     case decode_term(contents) do
       %{vsn: @vsn, beams: beams, gate: gate, tests: tests, librefs: librefs} = baseline
       when is_map(beams) and is_binary(gate) ->
-        if Attribution.valid_tests?(tests) and Attribution.valid_librefs?(librefs) do
+        if Attribution.valid_tests?(tests) and Attribution.valid_librefs?(librefs) and
+             Qlover.TestCounts.valid_inventory?(Map.get(baseline, :test_counts, %{})) do
           {:ok, baseline}
         else
           :error

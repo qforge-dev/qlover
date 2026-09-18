@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-invocation test counts: `qlover: ran X tests; didn't run Y tests.`,
+  including failed and unchanged runs, with ExUnit skips/exclusions listed
+  separately. Per-file counts follow edits and deletions and are shared
+  with cached baselines.
 - Automatic releases: pull-request quality checks, rolling `dev` GitHub
   packages on successful pushes to `main`, and Hex package/docs publishing
   for non-prerelease GitHub releases whose tags match `VERSION`.

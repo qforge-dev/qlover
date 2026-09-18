@@ -48,6 +48,14 @@ defmodule Mix.Tasks.Test.Qlover do
   the affected tests rerun in the focused run instead of the full
   suite (see `Mix.Tasks.Qlover`).
 
+  Each invocation reports `qlover: ran X tests; didn't run Y tests.` Counts
+  come from ExUnit (including generated tests and doctests); unchanged files
+  reuse counts stored in the baseline and shared cache. ExUnit skips and
+  exclusions are included in Y and reported separately. Failed runs also
+  print the summary. If a run aborts without reporting counts, unknown
+  values are labelled rather than estimated. Older baselines receive one
+  full run to collect counts.
+
   ## The `--qlover` flag spelling
 
   Mix does not let dependencies add flags to `mix test`, but the same
@@ -73,6 +81,7 @@ defmodule Mix.Tasks.Test.Qlover do
   use Mix.Task
 
   alias Mix.Tasks.Qlover
+  alias Elixir.Qlover.TestCounts
 
   @managed_flags [
     "--stale",
@@ -110,11 +119,15 @@ defmodule Mix.Tasks.Test.Qlover do
     case Qlover.load_baseline(settings) do
       :error ->
         Mix.shell().info(first_run_message(settings))
-        run_tests!(runner, ["--no-stale", "--cover"] ++ test_args)
-        Qlover.write_baseline!(settings)
+        run_full!(settings, runner, test_args, %{})
 
       {:ok, baseline} ->
-        run_incremental_or_full!(settings, runner, test_args, baseline)
+        if Map.has_key?(baseline, :test_counts) do
+          run_incremental_or_full!(settings, runner, test_args, baseline)
+        else
+          Mix.shell().info("qlover: recording test counts, running full suite...")
+          run_full!(settings, runner, test_args, baseline)
+        end
     end
   end
 
@@ -129,6 +142,32 @@ defmodule Mix.Tasks.Test.Qlover do
   end
 
   @doc false
+  def default_runner(["test" | args]) do
+    dir = Mix.Project.manifest_path()
+    File.mkdir_p!(dir)
+
+    path =
+      Path.join(dir, "qlover-counts-#{System.pid()}-#{System.unique_integer([:positive])}.term")
+
+    File.rm(path)
+
+    try do
+      code =
+        default_runner([
+          "run",
+          "--no-start",
+          "--no-compile",
+          "-e",
+          "Qlover.TestCounts.install(#{inspect(path)}); Mix.Task.run(\"test\", System.argv())",
+          "--" | args
+        ])
+
+      {code, TestCounts.read_report(path)}
+    after
+      File.rm(path)
+    end
+  end
+
   def default_runner(argv) do
     {_output, code} =
       System.cmd("mix", argv,
@@ -181,24 +220,27 @@ defmodule Mix.Tasks.Test.Qlover do
   defp run_incremental_or_full!(settings, runner, test_args, baseline) do
     if baseline.gate != Qlover.gate_hash(settings.gate_paths, settings.project_root) do
       Mix.shell().info(first_run_message(settings))
-      run_tests!(runner, ["--no-stale", "--cover"] ++ test_args)
-      Qlover.write_baseline!(settings)
+      run_full!(settings, runner, test_args, baseline)
     else
       current = Qlover.beam_hashes(settings.compile_path)
 
       case Qlover.attribution_plan(settings, baseline, current) do
         {:full, reason} ->
           Mix.shell().info(attribution_fallback_message(reason))
-          run_tests!(runner, ["--no-stale", "--cover"] ++ test_args)
-          Qlover.write_baseline!(settings)
+          run_full!(settings, runner, test_args, baseline)
 
         {:incremental, %{prove: prove, run: run}} ->
-          run_focused!(settings, runner, test_args, prove, run)
+          run_focused!(settings, runner, test_args, prove, run, baseline)
       end
     end
   end
 
-  defp run_focused!(settings, runner, test_args, prove, run) do
+  defp run_full!(settings, runner, test_args, baseline) do
+    result = runner.(["test", "--no-stale", "--cover"] ++ test_args)
+    finish_run!(settings, baseline, result, &Qlover.write_baseline!/1)
+  end
+
+  defp run_focused!(settings, runner, test_args, prove, run, baseline) do
     cond do
       run != [] ->
         Mix.shell().info("qlover: running #{length(run)} focused test file(s) with coverage...")
@@ -212,29 +254,32 @@ defmodule Mix.Tasks.Test.Qlover do
         )
     end
 
-    if run != [] do
-      # NOTE: --no-stale is load-bearing here, not just cosmetic.
-      # Host projects often alias `test` with `--stale` injected
-      # (e.g. `test: [..., "test --stale"]`); without our own --no-stale
-      # first, the alias would intersect our explicit file list with the
-      # (possibly fresh) stale manifest and silently run nothing.
-      # Appending `--no-stale` wins the duplicate-flag resolution and makes
-      # the explicit selection unconditional. User file arguments are
-      # appended after the selection: they can only widen the run, which
-      # stays sound because all coverage comes from one code version.
-      run_tests!(
-        runner,
-        [
-          "--no-stale",
-          "--cover",
-          "--export-coverage",
-          export_name(settings.export_path)
-        ] ++ run ++ test_args
-      )
-    end
+    result =
+      if run != [] do
+        # NOTE: --no-stale is load-bearing here, not just cosmetic.
+        # Host projects often alias `test` with `--stale` injected
+        # (e.g. `test: [..., "test --stale"]`); without our own --no-stale
+        # first, the alias would intersect our explicit file list with the
+        # (possibly fresh) stale manifest and silently run nothing.
+        # Appending `--no-stale` wins the duplicate-flag resolution and makes
+        # the explicit selection unconditional. User file arguments are
+        # appended after the selection: they can only widen the run, which
+        # stays sound because all coverage comes from one code version.
+        runner.(
+          [
+            "test",
+            "--no-stale",
+            "--cover",
+            "--export-coverage",
+            export_name(settings.export_path)
+          ] ++ run ++ test_args
+        )
+      else
+        {0, %{ran: 0, skipped: 0, files: %{}}}
+      end
 
     try do
-      Qlover.gate!(settings)
+      finish_run!(settings, baseline, result, &Qlover.gate!/1)
     after
       _ = File.rm(settings.export_path)
       _ = File.rm(settings.expansion_export_path)
@@ -249,10 +294,17 @@ defmodule Mix.Tasks.Test.Qlover do
     "qlover: test changes need full attribution, running full suite..."
   end
 
-  defp run_tests!(runner, test_args) do
-    case runner.(["test" | test_args]) do
-      0 -> :ok
-      code -> Mix.raise("qlover test run failed (exit #{code}); not gating")
+  defp finish_run!(settings, baseline, result, next) do
+    {code, report} = if is_tuple(result), do: result, else: {result, nil}
+    counts = TestCounts.inventory(settings, baseline, report)
+
+    try do
+      case code do
+        0 -> next.(%{settings | test_counts: counts})
+        code -> Mix.raise("qlover test run failed (exit #{code}); not gating")
+      end
+    after
+      Mix.shell().info(TestCounts.summary(counts, report))
     end
   end
 
