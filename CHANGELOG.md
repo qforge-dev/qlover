@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-18
+
 ### Added
 
 - `mix test.qlover --no-stale` to force a full test-suite rerun and refresh the
