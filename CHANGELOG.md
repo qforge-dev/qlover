@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Treat `test_helper.exs` as a suite-wide input: no missing-attribution
+  warning, and helper additions, edits, or deletions always require a full
+  run, including when tracer records exist.
 - Round coverage percentages down to two decimals in `mix test.qlover`,
   so coverage below 100% displays as `99.99%` rather than `100.00%`.
   Threshold checks still use exact counts.

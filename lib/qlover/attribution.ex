@@ -39,6 +39,10 @@ defmodule Qlover.Attribution do
     String.ends_with?(relpath, ".ex") or String.ends_with?(relpath, ".exs")
   end
 
+  defp suite_input?(relpath) do
+    not code_file?(relpath) or Path.basename(relpath) == "test_helper.exs"
+  end
+
   @doc false
   def beam_module_string(beam) when is_binary(beam) do
     Path.basename(beam, ".beam")
@@ -268,7 +272,7 @@ defmodule Qlover.Attribution do
     diff = diff_tests(baseline_tests, current_tests)
     changed = diff.added ++ diff.removed ++ diff.modified
 
-    if Enum.any?(changed, &(not code_file?(&1))) do
+    if Enum.any?(changed, &suite_input?/1) do
       {:full, :test_fixtures}
     else
       changed_code = Enum.filter(diff.modified ++ diff.removed, &code_file?/1)
@@ -334,7 +338,7 @@ defmodule Qlover.Attribution do
 
   defp snapshot_modules(rel, sha, baseline_tests, fresh_records) do
     cond do
-      not code_file?(rel) -> []
+      suite_input?(rel) -> []
       fresh_match?(Map.get(fresh_records, rel), sha) -> fresh_records[rel].modules
       baseline_match?(Map.get(baseline_tests, rel), sha) -> baseline_tests[rel].modules
       true -> nil

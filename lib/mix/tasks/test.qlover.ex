@@ -292,7 +292,7 @@ defmodule Mix.Tasks.Test.Qlover do
   end
 
   defp attribution_fallback_message(:test_fixtures) do
-    "qlover: test fixtures changed, running full suite..."
+    "qlover: test fixtures or helpers changed, running full suite..."
   end
 
   defp attribution_fallback_message(:unattributed) do

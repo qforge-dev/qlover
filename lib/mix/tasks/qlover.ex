@@ -214,7 +214,7 @@ defmodule Mix.Tasks.Qlover do
 
     case attribution_plan(settings, baseline, current) do
       {:full, :test_fixtures} ->
-        Mix.raise("qlover test fixtures changed; run full coverage")
+        Mix.raise("qlover test fixtures or helpers changed; run full coverage")
 
       {:full, :unattributed} ->
         Mix.raise("qlover cannot attribute test changes; run full coverage")

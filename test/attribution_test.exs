@@ -341,6 +341,21 @@ defmodule Qlover.AttributionTest do
     assert Attribution.unknown_files(%{}) == []
   end
 
+  test "test helpers need no module attribution, including snapshots from older baselines" do
+    for path <- ["test/test_helper.exs", "integration/test_helper.exs"],
+        modules <- [nil, [], ["Elixir.SomeModule"]] do
+      old = %{path => %{sha: "old", modules: modules}}
+      fresh = %{path => %{path: path, sha: "new", modules: modules, defined: []}}
+      snapshot = Attribution.snapshot_tests(%{path => "new"}, old, fresh)
+      assert snapshot[path] == %{sha: "new", modules: []}
+      assert Attribution.unknown_files(snapshot) == []
+    end
+
+    # Actual untraced tests still need attribution, even without a module.
+    snapshot = Attribution.snapshot_tests(%{"test/real_test.exs" => "new"}, %{}, %{})
+    assert Attribution.unknown_files(snapshot) == ["test/real_test.exs"]
+  end
+
   test "prune_records drops stale, corrupt, and foreign records" do
     entries = [
       {"keep_test.term", {:ok, %{path: "t/a.exs", sha: "1", modules: [], defined: []}}},
@@ -503,6 +518,42 @@ defmodule Qlover.AttributionTest do
              compiled_dirs: [],
              project_root: "/repo"
            }) == {:full, :unattributed}
+  end
+
+  test "helper additions, edits and removals always require a full suite regardless of references" do
+    for path <- ["test/test_helper.exs", "integration/test_helper.exs"],
+        modules <- [nil, [], ["Elixir.Setup"]],
+        {before, after_hashes} <- [
+          {%{}, %{path => "new"}},
+          {%{path => %{sha: "old", modules: modules}}, %{path => "new"}},
+          {%{path => %{sha: "old", modules: modules}}, %{}}
+        ] do
+      input = %{
+        beam_changed: [],
+        current_beams: %{},
+        baseline_tests: before,
+        current_tests: after_hashes,
+        union_refs: %{},
+        lib_edges: %{},
+        fresh_lib_edges: %{},
+        compiled_dirs: [],
+        project_root: "/repo"
+      }
+
+      assert Attribution.plan(input) == {:full, :test_fixtures}
+    end
+
+    assert Attribution.plan(%{
+             beam_changed: [],
+             current_beams: %{},
+             baseline_tests: %{"test/test_helper.exs" => %{sha: "same", modules: nil}},
+             current_tests: %{"test/test_helper.exs" => "same"},
+             union_refs: %{},
+             lib_edges: %{},
+             fresh_lib_edges: %{},
+             compiled_dirs: [],
+             project_root: "/repo"
+           }) == {:incremental, %{prove: [], run: [], test_changed: false}}
   end
 
   test "plan closes over fresh lib edges for changed beams" do

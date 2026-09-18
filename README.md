@@ -114,9 +114,10 @@ fresh evidence where something changed.
    A test or coverage failure stops the run; a successful check advances
    the baseline.
 
-Changes to configuration, dependencies, migrations, or test fixtures can
-trigger a full run. Missing reference data for changed tests also falls
-back to the full suite.
+Changes to configuration, dependencies, migrations, test helpers, or test
+fixtures can trigger a full run. `test_helper.exs` is a suite-wide input and
+needs no per-test attribution. Missing reference data for changed tests
+also falls back to the full suite.
 
 Requires Elixir 1.18 or newer and a **100% coverage policy**. Ordinary
 `mix test` and `mix test test/my_test.exs` remain available for your usual

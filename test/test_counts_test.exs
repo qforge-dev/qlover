@@ -278,8 +278,16 @@ defmodule Qlover.TestCountsTest do
     {full, code} = run.(["test.qlover"])
     assert code == 0, full
     assert full =~ "qlover: ran 5 tests; didn't run 0 tests."
+    refute full =~ "no reference data"
     {unchanged, 0} = run.(["test.qlover"])
     assert unchanged =~ "qlover: ran 0 tests; didn't run 5 tests."
+
+    File.write!(Path.join(dir, "test/test_helper.exs"), "ExUnit.start()\n# suite setup changed\n")
+    {helper_changed, code} = run.(["test.qlover"])
+    assert code == 0, helper_changed
+    assert helper_changed =~ "test fixtures or helpers changed, running full suite"
+    assert helper_changed =~ "qlover: ran 5 tests; didn't run 0 tests."
+    refute helper_changed =~ "no reference data"
 
     file = Path.join(dir, "test/b_test.exs")
     File.write!(file, File.read!(file) |> String.replace("== 2", "== 3"))
