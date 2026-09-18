@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Automatic releases: pull-request quality checks, rolling `dev` GitHub
+  packages on successful pushes to `main`, and Hex package/docs publishing
+  for non-prerelease GitHub releases whose tags match `VERSION`.
 - Per-test-file attribution: test-only edits gate incrementally via a
   compiler-tracer reference graph (`Qlover.Tracer`, enabled with
   `elixirc_options` + `test_elixirc_options`) with transitive lib closure,

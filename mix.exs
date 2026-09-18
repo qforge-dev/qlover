@@ -1,7 +1,7 @@
 defmodule Qlover.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version File.read!(Path.join(__DIR__, "VERSION")) |> String.trim()
   @source_url "https://github.com/qforge-dev/qlover"
 
   def project do
@@ -37,6 +37,7 @@ defmodule Qlover.MixProject do
     [
       main: "readme",
       source_url: @source_url,
+      assets: %{"docs/assets" => "docs/assets"},
       extras: ["README.md", "CHANGELOG.md"]
     ]
   end
@@ -50,7 +51,16 @@ defmodule Qlover.MixProject do
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url},
       maintainers: ["Michal Warda"],
-      files: ["lib", "cover.sh", "README.md", "CHANGELOG.md", "LICENSE", "mix.exs"]
+      files: [
+        "lib",
+        "cover.sh",
+        "docs/assets",
+        "VERSION",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "mix.exs"
+      ]
     ]
   end
 end

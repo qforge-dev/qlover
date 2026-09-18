@@ -320,7 +320,7 @@ defmodule Qlover.TestTaskTest do
   end
 
   test "user file args widen the selection", %{tmp_dir: dir} do
-    {mod, beam} = compile_beam!(dir, "WideM", "  def a, do: :ok\n  def b, do: :ok\n")
+    {mod, _beam} = compile_beam!(dir, "WideM", "  def a, do: :ok\n  def b, do: :ok\n")
     opts = task_opts(dir)
     rel = write_test!(dir, "wide_test.exs", "# v1\n")
     old_sha = file_sha!(dir, rel)

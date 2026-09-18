@@ -1,0 +1,119 @@
+name: Releases
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'release' && github.event.release.tag_name || github.event_name == 'pull_request' && github.ref || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  QLOVER_CACHE_DIR: ""
+  QLOVER_RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || 'dev' }}
+  QLOVER_RELEASE_ID: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+
+jobs:
+  quality:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0.3"
+          elixir-version: "1.20.2"
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix deps.get --check-locked
+      - run: bash scripts/check
+
+  build:
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    needs: quality
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0.3"
+          elixir-version: "1.20.2"
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix deps.get --check-locked
+      - name: Verify release version
+        if: github.event_name == 'release'
+        run: bash scripts/check-release-version "$QLOVER_RELEASE_TAG"
+      - name: Build Mix package and documentation
+        run: |
+          mix hex.build
+          mix docs --warnings-as-errors
+          mkdir -p dist
+          version=$(tr -d '[:space:]' < VERSION)
+          cp "qlover-$version.tar" "dist/qlover-$QLOVER_RELEASE_ID.tar"
+          tar -czf "dist/qlover-$QLOVER_RELEASE_ID-docs.tar.gz" -C doc .
+          (cd dist && sha256sum qlover-* > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: dist
+      - name: Verify checksums
+        run: (cd dist && sha256sum --check SHA256SUMS)
+      - name: Replace rolling dev release
+        if: github.event_name != 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete dev --cleanup-tag --yes || true
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" || true
+          gh release create dev dist/* \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "qlover dev (${GITHUB_SHA::7})" \
+            --notes "Rolling development package for commit $GITHUB_SHA. Assets are replaced by every successful push to main."
+      - name: Upload versioned release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$QLOVER_RELEASE_TAG" dist/* --clobber
+      - name: Mark stable release as latest
+        if: github.event_name == 'release' && !github.event.release.prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$QLOVER_RELEASE_TAG" --latest
+      - uses: erlef/setup-beam@v1
+        if: github.event_name == 'release' && !github.event.release.prerelease
+        with:
+          otp-version: "29.0.3"
+          elixir-version: "1.20.2"
+      - name: Publish Mix package and documentation to Hex
+        if: github.event_name == 'release' && !github.event.release.prerelease
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          test -n "$HEX_API_KEY" || { echo 'HEX_API_KEY secret is required' >&2; exit 1; }
+          mix local.hex --force
+          mix deps.get --check-locked
+          mix hex.publish --yes

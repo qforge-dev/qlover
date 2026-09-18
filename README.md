@@ -45,7 +45,7 @@ Elixir**. It remembers a passing coverage baseline, runs the tests needed
 for your changes, and checks the affected code again. Less repeated work,
 less waiting, less compute spent proving what you already know.
 
-Measured in the [48-test demo](examples/demo), comparing a full
+Measured in the [48-test demo](https://github.com/qforge-dev/qlover/tree/main/examples/demo), comparing a full
 `mix test --no-stale --cover` run with `mix test.qlover`:
 
 | Change | Without qlover | With qlover | Test executions avoided | Result, both |
@@ -65,7 +65,7 @@ These are test-execution savings, not wall-clock speedup percentages.
 Startup, compilation, and coverage checks still take time; the time saved
 depends on how expensive your tests are. The animation illustrates these
 counts after a green baseline; its playback is not a timing benchmark.
-[Still image](docs/assets/comparison.png) · [All results and reproduction](examples/demo)
+[Still image](docs/assets/comparison.png) · [All results and reproduction](https://github.com/qforge-dev/qlover/tree/main/examples/demo)
 
 ## Why qlover exists
 
@@ -149,4 +149,4 @@ The script establishes a full baseline, applies independent changes, and
 compares qlover with full coverage for each one. It prints test counts and
 pass/fail results, and exits unsuccessfully if the verdicts disagree.
 
-[Demo and full results](examples/demo) · [Changelog](CHANGELOG.md) · [Apache-2.0 license](LICENSE)
+[Demo and full results](https://github.com/qforge-dev/qlover/tree/main/examples/demo) · [Changelog](CHANGELOG.md) · [Apache-2.0 license](https://github.com/qforge-dev/qlover/blob/main/LICENSE)
