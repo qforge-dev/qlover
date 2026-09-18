@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 
-WIDTH, HEIGHT = 1100, 620
+WIDTH, HEIGHT = 1100, 462
 BG = "#0b1018"
 PANEL = "#121d2b"
 BORDER = "#29384d"
@@ -18,7 +18,6 @@ RED = "#ff929b"
 
 SCENES = [
     {
-        "title": "Nothing changed. Why run it again?",
         "selected": 0,
         "full": 48,
         "reason": "baseline matches",
@@ -27,7 +26,6 @@ SCENES = [
         "failed": False,
     },
     {
-        "title": "One module changed. Check that change.",
         "selected": 8,
         "full": 48,
         "reason": "1 test file selected",
@@ -36,7 +34,6 @@ SCENES = [
         "failed": False,
     },
     {
-        "title": "Uncovered code still fails the check.",
         "selected": 1,
         "full": 49,
         "reason": "1 test file selected",
@@ -59,27 +56,23 @@ def font_path(explicit):
     raise SystemExit("No monospace font found. Supply --font /path/to/font.ttf")
 
 
-def render(scene, index, step, fonts):
+def render(scene, step, fonts):
     image = Image.new("RGB", (WIDTH, HEIGHT), BG)
     draw = ImageDraw.Draw(image)
 
     def text(x, y, value, color=TEXT, size=21):
         draw.text((x, y), value, font=fonts[size], fill=color)
 
-    text(28, 22, "qlover / do less repeated work", GREEN, 28)
-    text(28, 64, scene["title"], TEXT, 24)
-    text(28, 104, "48-test demo / each scenario starts from a green baseline", MUTED, 18)
-
     for left, x in [(True, 28), (False, 564)]:
         accent = GREEN if left else AMBER
-        draw.rounded_rectangle((x, 148, x + 508, 518), radius=14, fill=PANEL, outline=BORDER, width=2)
+        draw.rounded_rectangle((x, 24, x + 508, 394), radius=14, fill=PANEL, outline=BORDER, width=2)
         for dot, color in enumerate([RED, AMBER, GREEN]):
-            draw.ellipse((x + 18 + dot * 19, 169, x + 27 + dot * 19, 178), fill=color)
-        text(x + 98, 161, "with qlover" if left else "without qlover", accent)
-        draw.line((x + 1, 197, x + 507, 197), fill=BORDER, width=1)
+            draw.ellipse((x + 18 + dot * 19, 45, x + 27 + dot * 19, 54), fill=color)
+        text(x + 98, 37, "with qlover" if left else "without qlover", accent)
+        draw.line((x + 1, 73, x + 507, 73), fill=BORDER, width=1)
         command = "$ mix test.qlover" if left else "$ mix test --no-stale --cover"
-        text(x + 20, 218, command)
-        text(x + 20, 258, scene["reason"] if left else "full suite selected", MUTED)
+        text(x + 20, 94, command)
+        text(x + 20, 134, scene["reason"] if left else "full suite selected", MUTED)
 
         total = scene["selected"] if left else scene["full"]
         # A schematic progression of test counts, deliberately not a clock.
@@ -89,29 +82,22 @@ def render(scene, index, step, fonts):
             column, row = test % 25, test // 25
             color = accent if test < count else BORDER
             draw.rounded_rectangle(
-                (x + 20 + column * 18, 303 + row * 20,
-                 x + 30 + column * 18, 313 + row * 20),
+                (x + 20 + column * 18, 179 + row * 20,
+                 x + 30 + column * 18, 189 + row * 20),
                 radius=2, fill=color,
             )
 
-        text(x + 20, 358, f"{count} {'test' if count == 1 else 'tests'}", accent, 36)
+        text(x + 20, 234, f"{count} {'test' if count == 1 else 'tests'}", accent, 36)
         if done:
             failed = scene["failed"]
-            text(x + 20, 416, "FAIL / coverage" if failed else "PASS / coverage", RED if failed else GREEN)
+            text(x + 20, 292, "FAIL / coverage" if failed else "PASS / coverage", RED if failed else GREEN)
             detail = scene["result"] if left or failed else "full suite: 100%"
-            text(x + 20, 456, detail, MUTED)
+            text(x + 20, 332, detail, MUTED)
         else:
-            text(x + 20, 416, "checking..." if step == 0 else "running tests...", MUTED)
+            text(x + 20, 292, "checking..." if step == 0 else "running tests...", MUTED)
 
     if step >= 7:
-        text(28, 538, scene["saving"], GREEN if not scene["failed"] else RED, 24)
-    else:
-        text(28, 538, "Fresh coverage for the work that changed.", MUTED, 24)
-
-    text(28, 584, "Illustration / measured test counts, not elapsed time", MUTED, 18)
-    for dot in range(len(SCENES)):
-        x = 1004 + dot * 24
-        draw.ellipse((x, 588, x + 10, 598), fill=GREEN if dot == index else BORDER)
+        text(28, 416, scene["saving"], GREEN if not scene["failed"] else RED, 24)
     return image
 
 
@@ -120,15 +106,15 @@ def main():
     parser.add_argument("--font", help="Path to a monospace TTF/OTF/TTC font")
     args = parser.parse_args()
     path = font_path(args.font)
-    fonts = {size: ImageFont.truetype(path, size) for size in [18, 21, 24, 28, 36]}
+    fonts = {size: ImageFont.truetype(path, size) for size in [21, 24, 36]}
     output = Path(__file__).resolve().parent
 
     # Put a complete comparison first so even a non-animating preview is useful.
-    frames = [render(SCENES[1], 1, 7, fonts)]
+    frames = [render(SCENES[1], 7, fonts)]
     durations = [1800]
-    for index, scene in enumerate(SCENES):
+    for scene in SCENES:
         for step in range(8):
-            frames.append(render(scene, index, step, fonts))
+            frames.append(render(scene, step, fonts))
             durations.append(2400 if step == 7 else 450)
 
     # A shared palette avoids flicker when the GIF advances between frames.
@@ -138,7 +124,7 @@ def main():
         output / "comparison.gif", save_all=True, append_images=frames[1:],
         duration=durations, loop=0, optimize=True, disposal=2,
     )
-    render(SCENES[1], 1, 7, fonts).save(output / "comparison.png", optimize=True)
+    render(SCENES[1], 7, fonts).save(output / "comparison.png", optimize=True)
     print(f"Rendered {len(frames)} frames to {output / 'comparison.gif'}")
 
 

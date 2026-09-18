@@ -10,9 +10,10 @@ It illustrates three measured scenarios from the [demo](../../examples/demo):
 | Add uncovered code | 1 | 49 | Coverage fails |
 
 The terminal output is condensed and animated for explanation. Playback
-speed does **not** represent elapsed command time. That label appears
-inside the image as well as in the README caption. `comparison.png` is a
-still of the module-edit scenario for readers who prefer a static image.
+speed does **not** represent elapsed command time. The image contains only
+the terminal windows and result summary; the README's comparison section
+explains the measurement. `comparison.png` is a still of the module-edit
+scenario for readers who prefer a static image.
 
 ## Regenerate
 

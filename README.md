@@ -1,5 +1,41 @@
 # qlover
 
+![Side-by-side terminal illustration: qlover on the left runs 0 tests for an unchanged rerun, 8 after a module edit, and 1 when uncovered code is added; full coverage on the right runs 48, 48, and 49. Both reject the uncovered code.](docs/assets/comparison.gif)
+
+## Install
+
+```elixir
+# mix.exs
+
+defp deps do
+  [
+    # Your existing dependencies...
+    {:qlover, github: "qforge-dev/qlover", only: :test, runtime: false}
+  ]
+end
+
+def project do
+  [
+    # Your existing project settings...
+    test_coverage: [summary: [threshold: 100]],
+    elixirc_options: [tracers: qlover_tracers()],
+    test_elixirc_options: [tracers: qlover_tracers()]
+  ]
+end
+
+def cli do
+  [preferred_envs: [qlover: :test, "test.qlover": :test]]
+end
+
+defp qlover_tracers do
+  if Mix.env() == :test, do: [Qlover.Tracer], else: []
+end
+```
+
+Run: `mix test.qlover`
+
+## How much work can you skip?
+
 **Stop paying for the same test run.**
 
 Your tests passed. You changed one file. Why run everything again?
@@ -8,8 +44,6 @@ qlover is an incremental test runner and **100% line-coverage gate for
 Elixir**. It remembers a passing coverage baseline, runs the tests needed
 for your changes, and checks the affected code again. Less repeated work,
 less waiting, less compute spent proving what you already know.
-
-## How much work can you skip?
 
 Measured in the [48-test demo](examples/demo), comparing a full
 `mix test --no-stale --cover` run with `mix test.qlover`:
@@ -29,71 +63,9 @@ row is an unchanged rerun, not a free first run.
 
 These are test-execution savings, not wall-clock speedup percentages.
 Startup, compilation, and coverage checks still take time; the time saved
-depends on how expensive your tests are. The demo also checks deleted
-tests, deleted modules, and failing new tests. [See all results and reproduce them.](examples/demo)
-
-![Side-by-side terminal illustration: qlover on the left runs 0 tests for an unchanged rerun, 8 after a module edit, and 1 when uncovered code is added; full coverage on the right runs 48, 48, and 49. Both reject the uncovered code.](docs/assets/comparison.gif)
-
-*Illustrated playback of the measured counts above, after a green baseline;
-not a real-time recording. [Still image](docs/assets/comparison.png).*
-
-## Install
-
-Requires Elixir 1.18 or newer. Add qlover to your dependencies in `mix.exs`:
-
-```elixir
-defp deps do
-  [
-    # Your existing dependencies...
-    {:qlover, github: "qforge-dev/qlover", only: :test, runtime: false}
-  ]
-end
-```
-
-Add these settings to your existing project configuration. The tracer
-records which modules your tests reference so qlover can select test files.
-
-```elixir
-def project do
-  [
-    # Your existing project settings...
-    test_coverage: [summary: [threshold: 100]],
-    elixirc_options: [tracers: qlover_tracers()],
-    test_elixirc_options: [tracers: qlover_tracers()]
-  ]
-end
-
-def cli do
-  [preferred_envs: [qlover: :test, "test.qlover": :test]]
-end
-
-defp qlover_tracers do
-  if Mix.env() == :test, do: [Qlover.Tracer], else: []
-end
-```
-
-Merge these entries with any existing coverage, compiler, tracer, and CLI
-settings. The tracer is enabled only in the test environment because
-qlover is a test-only dependency.
-
-Then run:
-
-```sh
-mix deps.get
-mix test.qlover
-```
-
-With no local baseline or matching shared cache, this runs the full suite
-with coverage. Once it passes at 100%, qlover saves the baseline. Use the
-same command after your next edit:
-
-```sh
-mix test.qlover
-```
-
-Ordinary `mix test` and `mix test test/my_test.exs` remain available for
-your usual test workflow. qlover currently targets a **100% coverage
-policy**; its incremental check is not a configurable lower threshold.
+depends on how expensive your tests are. The animation illustrates these
+counts after a green baseline; its playback is not a timing benchmark.
+[Still image](docs/assets/comparison.png) · [All results and reproduction](examples/demo)
 
 ## Why qlover exists
 
@@ -132,6 +104,10 @@ fresh evidence where something changed.
 Changes to configuration, dependencies, migrations, or test fixtures can
 trigger a full run. Missing reference data for changed tests also falls
 back to the full suite.
+
+Requires Elixir 1.18 or newer and a **100% coverage policy**. Ordinary
+`mix test` and `mix test test/my_test.exs` remain available for your usual
+test workflow.
 
 Selection uses recorded module references. Dynamic calls, protocol
 dispatch, and external inputs outside the tracked paths can escape that
