@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `./release` to bump the version (patch by default), update the changelog,
+  commit and push the release tag, and publish the GitHub release that
+  triggers Hex package and documentation publishing.
 - Per-invocation test counts: `qlover: ran X tests; didn't run Y tests.`,
   including failed and unchanged runs, with ExUnit skips/exclusions listed
   separately. Per-file counts follow edits and deletions and are shared

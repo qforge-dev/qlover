@@ -7,5 +7,5 @@ export QLOVER_CACHE_DIR=""
 mix format --check-formatted
 MIX_ENV=test mix compile --warnings-as-errors
 mix test --warnings-as-errors --cover
-bash -n scripts/check scripts/check-release-version
+bash -n release scripts/check scripts/check-release-version
 bash scripts/check-release-version "v$(tr -d '[:space:]' < VERSION)"

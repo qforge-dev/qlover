@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Bump, commit, tag, push, and publish a stable qlover release.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./release [patch|minor|major|VERSION]
+
+Defaults to a patch bump. VERSION must be a higher stable version (X.Y.Z).
+Run from a clean main branch with git, gh, and Mix available.
+
+Runs the quality checks, moves Unreleased changelog entries into the new
+version, commits VERSION and CHANGELOG.md, and pushes main and the tag to
+origin. Publishes a GitHub release to trigger package/docs publishing to Hex.
+
+Examples:
+  ./release          # 0.1.0 -> 0.1.1
+  ./release minor    # 0.1.0 -> 0.2.0
+  ./release 1.0.0
+EOF
+}
+
+fail() { echo "qlover: $*" >&2; exit 1; }
+
+if [[ $# == 1 && ( $1 == --help || $1 == -h ) ]]; then
+  usage
+  exit 0
+fi
+[[ $# -le 1 ]] || { usage >&2; exit 64; }
+
+root=$(cd "$(dirname "$0")" && pwd)
+cd "$root"
+
+stable='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+current=$(tr -d '[:space:]' < VERSION)
+[[ "$current" =~ $stable ]] || fail "VERSION must contain a stable version (got $current)"
+major=${BASH_REMATCH[1]}
+minor=${BASH_REMATCH[2]}
+patch=${BASH_REMATCH[3]}
+
+case "${1:-patch}" in
+  patch) next="$major.$minor.$((patch + 1))" ;;
+  minor) next="$major.$((minor + 1)).0" ;;
+  major) next="$((major + 1)).0.0" ;;
+  *) next=$1 ;;
+esac
+
+[[ "$next" =~ $stable ]] || fail "expected patch, minor, major, or a stable version (X.Y.Z)"
+(( BASH_REMATCH[1] > major ||
+   (BASH_REMATCH[1] == major && BASH_REMATCH[2] > minor) ||
+   (BASH_REMATCH[1] == major && BASH_REMATCH[2] == minor && BASH_REMATCH[3] > patch) )) ||
+  fail "new version $next must be greater than $current"
+tag="v$next"
+
+[[ $(git branch --show-current) == main ]] || fail "switch to main before releasing"
+[[ -z $(git status --porcelain) ]] || fail "commit or stash pending changes before releasing"
+[[ $(grep -c '^## \[Unreleased\]$' CHANGELOG.md) == 1 ]] ||
+  fail "CHANGELOG.md must contain exactly one Unreleased heading"
+
+git fetch origin main
+git merge-base --is-ancestor FETCH_HEAD HEAD || fail "update main from origin before releasing"
+repo=$(gh repo view "$(git remote get-url origin)" --json nameWithOwner --jq .nameWithOwner)
+if git show-ref --verify --quiet "refs/tags/$tag"; then
+  fail "tag $tag already exists locally"
+fi
+remote_tag=$(git ls-remote --tags origin "refs/tags/$tag")
+[[ -z "$remote_tag" ]] || fail "tag $tag already exists on origin"
+if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+  fail "GitHub release $tag already exists"
+fi
+
+echo "qlover: checking release $current -> $next..."
+MIX_ENV=dev mix deps.get --check-locked
+bash scripts/check
+MIX_ENV=dev mix docs --warnings-as-errors
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/qlover-release.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+awk '
+  /^## \[Unreleased\]$/ { active = 1; next }
+  active && /^## / { exit }
+  active { print }
+' CHANGELOG.md > "$tmp/notes.md"
+if ! grep -q '[^[:space:]]' "$tmp/notes.md"; then
+  echo "Release $tag." > "$tmp/notes.md"
+fi
+
+awk -v version="$next" -v date="$(date +%F)" '
+  { print }
+  /^## \[Unreleased\]$/ { print "\n## [" version "] - " date }
+' CHANGELOG.md > "$tmp/CHANGELOG.md"
+cat "$tmp/CHANGELOG.md" > CHANGELOG.md
+printf '%s\n' "$next" > VERSION
+bash scripts/check-release-version "$tag"
+
+git add -- VERSION CHANGELOG.md
+git commit -m "Release $tag"
+git tag -a "$tag" -m "qlover $tag"
+git push --atomic origin HEAD:refs/heads/main "refs/tags/$tag"
+
+if ! gh release create "$tag" --repo "$repo" --verify-tag \
+    --title "qlover $tag" --notes-file "$tmp/notes.md"; then
+  echo "qlover: $tag is already pushed. Retry publishing with:" >&2
+  echo "gh release create $tag --repo $repo --verify-tag --generate-notes" >&2
+  exit 1
+fi
+echo "qlover: published $tag; GitHub Actions will build and publish the package and docs."
