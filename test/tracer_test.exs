@@ -9,6 +9,16 @@ defmodule Qlover.TracerTest do
   alias Qlover.Attribution
   alias Qlover.Tracer
 
+  defmodule CompletionTracer do
+    def trace(:start, env) do
+      owner = Application.fetch_env!(:qlover, :test_trace_owner)
+      send(owner, {:lexical_tracker, env.lexical_tracker})
+      :ok
+    end
+
+    def trace(_event, _env), do: :ok
+  end
+
   @moduletag :tmp_dir
 
   test "records remote calls with file and defining module", %{tmp_dir: dir} do
@@ -295,12 +305,39 @@ defmodule Qlover.TracerTest do
 
   defp with_tracers(fun) do
     prev = Code.get_compiler_option(:tracers)
-    Code.put_compiler_option(:tracers, [Tracer])
+    old_owner = Application.get_env(:qlover, :test_trace_owner)
+    Application.put_env(:qlover, :test_trace_owner, self())
+    Code.put_compiler_option(:tracers, [Tracer, CompletionTracer])
 
     try do
       fun.()
     after
-      Code.put_compiler_option(:tracers, prev)
+      try do
+        await_tracers()
+      after
+        Code.put_compiler_option(:tracers, prev)
+        restore_env(:test_trace_owner, old_owner)
+      end
+    end
+  end
+
+  defp await_tracers do
+    # ParallelCompiler acknowledges a file before its final :stop traces
+    # finish. The lexical tracker exits after those callbacks, so monitor
+    # it before reading records, editing sources, or restoring global env.
+    receive do
+      {:lexical_tracker, pid} ->
+        ref = Process.monitor(pid)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          5_000 -> flunk("compiler tracer did not finish")
+        end
+
+        await_tracers()
+    after
+      0 -> :ok
     end
   end
 
