@@ -1,0 +1,9 @@
+/_build/
+/deps/
+/cover/
+/doc/
+/tmp/
+/erl_crash.dump
+/.elixir_ls/
+qlover-*.tar
+.DS_Store
