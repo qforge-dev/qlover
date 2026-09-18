@@ -119,6 +119,9 @@ fixtures can trigger a full run. `test_helper.exs` is a suite-wide input and
 needs no per-test attribution. Missing reference data for changed tests
 also falls back to the full suite.
 
+Use `mix test.qlover --no-stale` to force a full suite run and refresh the
+baseline.
+
 Requires Elixir 1.18 or newer and a **100% coverage policy**. Ordinary
 `mix test` and `mix test test/my_test.exs` remain available for your usual
 test workflow.

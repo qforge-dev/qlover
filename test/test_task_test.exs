@@ -36,12 +36,15 @@ defmodule Qlover.TestTaskTest do
 
     assert exp_flags[:expansion_export] == "y"
     assert exp_rest == []
+
+    {no_stale_flags, no_stale_rest} = TestQlover.split_args!(["--no-stale", "--seed", "0"])
+    assert no_stale_flags[:no_stale]
+    assert no_stale_rest == ["--seed", "0"]
   end
 
   test "split_args! rejects flags managed by the task" do
     for flag <- [
           "--stale",
-          "--no-stale",
           "--cover",
           "--no-cover",
           "--export-coverage",
@@ -99,6 +102,27 @@ defmodule Qlover.TestTaskTest do
 
     assert File.read!(opts[:baseline]) == baseline_bytes
     refute File.exists?(opts[:export_path])
+  end
+
+  test "--no-stale forces a full run and refreshes the baseline", %{tmp_dir: dir} do
+    compile_beam!(dir, "Same", "  def a, do: :ok\n")
+    opts = task_opts(dir)
+
+    assert :ok = Qlover.run(["--write-baseline"], opts)
+
+    runner = fn cmd ->
+      send(self(), {:test_cmd, cmd})
+      0
+    end
+
+    assert :ok =
+             TestQlover.run(
+               ["--no-stale"],
+               Keyword.put(opts, :test_runner, runner)
+             )
+
+    assert_received {:test_cmd, ["test", "--no-stale", "--cover"]}
+    assert File.regular?(opts[:baseline])
   end
 
   test "focused run failure aborts before gating", %{tmp_dir: dir} do

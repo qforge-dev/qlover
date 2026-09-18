@@ -27,10 +27,10 @@ defmodule Mix.Tasks.Test.Qlover do
 
   Extra arguments are appended to the selection (`mix test.qlover --seed
   0`); extra *file* arguments widen it, which stays sound because all
-  coverage still comes from one code version. The flags `--stale`,
-  `--no-stale`, `--cover`, `--no-cover`, `--export-coverage`, `--failed`,
-  `--partitions`, `--dry-run`, `--no-compile` are managed by the task and
-  rejected when passed explicitly.
+  coverage still comes from one code version. `--no-stale` forces a full
+  suite run and refreshes the baseline. The flags `--stale`, `--cover`,
+  `--no-cover`, `--export-coverage`, `--failed`, `--partitions`, `--dry-run`,
+  `--no-compile` are managed by the task and rejected when passed explicitly.
 
   Path overrides (mirroring `mix qlover`):
 
@@ -125,11 +125,16 @@ defmodule Mix.Tasks.Test.Qlover do
         run_full!(settings, runner, test_args, %{})
 
       {:ok, baseline} ->
-        if Map.has_key?(baseline, :test_counts) do
-          run_incremental_or_full!(settings, runner, test_args, baseline)
-        else
-          Mix.shell().info("qlover: recording test counts, running full suite...")
+        if Keyword.get(flags, :no_stale, false) do
+          Mix.shell().info("qlover: --no-stale requested, running full suite...")
           run_full!(settings, runner, test_args, baseline)
+        else
+          if Map.has_key?(baseline, :test_counts) do
+            run_incremental_or_full!(settings, runner, test_args, baseline)
+          else
+            Mix.shell().info("qlover: recording test counts, running full suite...")
+            run_full!(settings, runner, test_args, baseline)
+          end
         end
     end
   end
@@ -192,6 +197,10 @@ defmodule Mix.Tasks.Test.Qlover do
 
   defp extract_flags(["--export", path | rest], flags, test_args) do
     extract_flags(rest, Keyword.put(flags, :export, path), test_args)
+  end
+
+  defp extract_flags(["--no-stale" | rest], flags, test_args) do
+    extract_flags(rest, Keyword.put(flags, :no_stale, true), test_args)
   end
 
   defp extract_flags(["--baseline=" <> path | rest], flags, test_args) do
