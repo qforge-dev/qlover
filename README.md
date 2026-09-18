@@ -334,6 +334,32 @@ mix test.qlover --baseline cover/.qlover_baseline --export cover/.qlover_fresh.c
 mix qlover --baseline cover/.qlover_baseline --export cover/.qlover_fresh.coverdata --expansion-export cover/.qlover_expansion.coverdata
 ```
 
+## Sharing work across checkouts
+
+Snapshots and tracer records are content-keyed, so parallel worktrees
+(and CI agents) share them instead of each paying for a full baseline
+run. Set the same `QLOVER_CACHE_DIR` everywhere (it defaults to
+`~/.cache/qlover`, XDG-aware; `""` disables it):
+
+```sh
+export QLOVER_CACHE_DIR=~/.cache/qlover
+mix test.qlover   # worktree A: full run once, baseline cached
+cd ../worktree-b  # identical content
+mix test.qlover   # compile, fetch baseline, gate passes with 0 tests
+```
+
+A cache hit is re-verified against the local tree exactly like a local
+baseline, so it can never pass where a local baseline would fail — the
+only new trust is "a green full run happened for this content", the same
+trust the baseline file already carries. Corrupt blobs are ignored, cache
+write failures degrade silently, and last-writer-wins record races only
+ever cost a fallback, never a pass. Two caveats: compiled beams embed
+absolute paths, so each checkout still compiles locally (cheap next to
+test runs), and a worktree that *changes* code still needs its own test
+execution — the cache removes the duplicate full runs, not the proving
+ones. The same layout works over remote storage; writers must be trusted
+(CI), readers verify locally.
+
 ## Prior art
 
 - OTP `:cover` partitions (`--partitions`, `--export-coverage`,

@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/demo`: runnable 48-test shop plus `compare.sh` measuring
   full-suite vs incremental across 11 scenarios (table in `README.md`);
   exits non-zero on any verdict mismatch.
+- Shared content-addressed cache (`QLOVER_CACHE_DIR`, default
+  `~/.cache/qlover`): snapshots write through under content keys, missing
+  baselines fetch and heal locally, tracer records merge across
+  directories. Verified with a cross-directory gating test.
 
 ## [0.1.0] - 2026-09-17
 

@@ -208,7 +208,7 @@ defmodule Qlover.TestTaskTest do
 
     assert :ok = TestQlover.run([], Keyword.put(opts, :test_runner, fn _cmd -> 0 end))
     assert %{gate: gate} = :erlang.binary_to_term(File.read!(opts[:baseline]))
-    assert gate == Qlover.gate_hash(opts[:gate_paths])
+    assert gate == Qlover.gate_hash(opts[:gate_paths], opts[:project_root])
   end
 
   test "full run failure never writes a baseline", %{tmp_dir: dir} do
@@ -273,7 +273,7 @@ defmodule Qlover.TestTaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{rel => %{sha: old_sha, modules: [Atom.to_string(mod)]}},
       librefs: %{}
     })
@@ -357,7 +357,7 @@ defmodule Qlover.TestTaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{
         rel => %{sha: old_sha, modules: [Atom.to_string(mod)]},
         "sup/help.ex" => %{sha: file_sha!(dir, "sup/help.ex"), modules: [Atom.to_string(mod)]}
@@ -396,7 +396,7 @@ defmodule Qlover.TestTaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{rel => %{sha: old_sha, modules: [Atom.to_string(mod)]}},
       librefs: %{}
     })
@@ -463,7 +463,7 @@ defmodule Qlover.TestTaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: tests,
       librefs: %{}
     })
@@ -487,6 +487,7 @@ defmodule Qlover.TestTaskTest do
       test_paths: ["t"],
       project_root: dir,
       refs_dir: Path.join(dir, "refs"),
+      cache_dir: Path.join(dir, "cache"),
       output: Path.join(dir, "html")
     ]
   end

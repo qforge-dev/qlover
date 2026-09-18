@@ -204,6 +204,54 @@ defmodule Qlover.Attribution do
   end
 
   @doc false
+  def cache_key(%{beams: beams, gate: gate, tests: tests}) do
+    test_shas =
+      tests
+      |> Enum.map(fn
+        {rel, %{sha: sha}} -> {rel, sha}
+        {rel, sha} when is_binary(sha) -> {rel, sha}
+      end)
+      |> Enum.sort()
+
+    payload = %{beams: Enum.sort(beams), gate: gate, tests: test_shas}
+    :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)
+  end
+
+  @doc false
+  def merge_records(local_entries, cache_entries, current_tests) do
+    local_by_file = Map.new(local_entries)
+    cache_by_file = Map.new(cache_entries)
+
+    filenames =
+      (Map.keys(local_by_file) ++ Map.keys(cache_by_file)) |> Enum.uniq() |> Enum.sort()
+
+    Enum.flat_map(filenames, fn filename ->
+      candidates = [
+        Map.get(local_by_file, filename, :error),
+        Map.get(cache_by_file, filename, :error)
+      ]
+
+      case pick_record(candidates, current_tests) do
+        {:ok, record} -> [record]
+        :error -> []
+      end
+    end)
+  end
+
+  defp pick_record(candidates, current_tests) do
+    oks = for {:ok, record} <- candidates, do: record
+
+    case Enum.find(oks, &matches_current?(&1, current_tests)) do
+      nil -> if oks == [], do: :error, else: {:ok, hd(oks)}
+      record -> {:ok, record}
+    end
+  end
+
+  defp matches_current?(%{path: path, sha: sha}, current_tests) do
+    is_binary(sha) and Map.get(current_tests, path) == sha
+  end
+
+  @doc false
   def plan(
         %{
           beam_changed: beam_changed,

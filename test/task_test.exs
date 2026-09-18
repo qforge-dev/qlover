@@ -216,16 +216,39 @@ defmodule Qlover.TaskTest do
   end
 
   test "resolves default settings" do
-    settings = Qlover.settings([], [])
+    with_env("QLOVER_CACHE_DIR", "/tmp/qlover-test-cache", fn ->
+      settings = Qlover.settings([], [])
 
-    assert settings.baseline == "cover/.qlover_baseline"
-    assert settings.compile_path == Mix.Project.compile_path()
-    assert settings.expansion_export_path == "cover/.qlover_expansion.coverdata"
-    assert settings.test_paths == ["test"]
-    assert settings.elixirc_paths == ["lib"]
-    assert settings.project_root == File.cwd!()
-    assert settings.refs_dir == Elixir.Qlover.Tracer.default_dir()
-    assert Elixir.Qlover.Tracer.default_dir() == Path.join(File.cwd!(), "cover/.qlover_refs")
+      assert settings.baseline == "cover/.qlover_baseline"
+      assert settings.compile_path == Mix.Project.compile_path()
+      assert settings.expansion_export_path == "cover/.qlover_expansion.coverdata"
+      assert settings.test_paths == ["test"]
+      assert settings.elixirc_paths == ["lib"]
+      assert settings.project_root == File.cwd!()
+      assert settings.refs_dir == Elixir.Qlover.Tracer.default_dir()
+      assert Elixir.Qlover.Tracer.default_dir() == Path.join(File.cwd!(), "cover/.qlover_refs")
+      assert settings.cache_dir == "/tmp/qlover-test-cache"
+    end)
+  end
+
+  test "resolves the default cache dir from the environment" do
+    with_env("QLOVER_CACHE_DIR", nil, fn ->
+      with_env("XDG_CACHE_HOME", nil, fn ->
+        if home = System.user_home() do
+          assert Qlover.settings([], []).cache_dir == Path.join([home, ".cache", "qlover"])
+        end
+      end)
+
+      with_env("XDG_CACHE_HOME", "/tmp/xdg-cache", fn ->
+        assert Qlover.settings([], []).cache_dir == "/tmp/xdg-cache/qlover"
+      end)
+
+      with_env("QLOVER_CACHE_DIR", "", fn ->
+        assert Qlover.settings([], []).cache_dir == nil
+      end)
+
+      assert Qlover.default_cache_dir() == Qlover.settings([], []).cache_dir
+    end)
   end
 
   test "test-only edits gate incrementally with fresh proof", %{tmp_dir: dir} do
@@ -237,7 +260,7 @@ defmodule Qlover.TaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{"t/attr_test.exs" => entry(old_sha, ["Elixir.QloverFixAttrM"])},
       librefs: %{}
     })
@@ -422,7 +445,7 @@ defmodule Qlover.TaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{rel => entry(old_sha, [Atom.to_string(mod_h)])},
       librefs: %{Atom.to_string(mod_h) => [Atom.to_string(mod_m)]}
     })
@@ -446,7 +469,7 @@ defmodule Qlover.TaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{rel => entry(old_sha, [Atom.to_string(mod_h)])},
       librefs: %{Atom.to_string(mod_h) => [Atom.to_string(mod_m)]}
     })
@@ -669,7 +692,7 @@ defmodule Qlover.TaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{rel => entry(sha, ["Elixir.QloverFixCarryM"])},
       librefs: %{}
     })
@@ -738,7 +761,7 @@ defmodule Qlover.TaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: Qlover.beam_hashes(opts[:compile_path]),
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: tests,
       librefs: %{}
     })
@@ -750,7 +773,7 @@ defmodule Qlover.TaskTest do
     write_baseline_map!(opts, %{
       vsn: 4,
       beams: beams,
-      gate: Qlover.gate_hash(opts[:gate_paths]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
       tests: %{},
       librefs: %{}
     })
@@ -768,6 +791,26 @@ defmodule Qlover.TaskTest do
   end
 
   defp record_filename(rel), do: Elixir.Qlover.Attribution.record_filename(rel)
+
+  defp with_env(key, value, fun) do
+    old = System.get_env(key)
+
+    if value == nil do
+      System.delete_env(key)
+    else
+      System.put_env(key, value)
+    end
+
+    try do
+      fun.()
+    after
+      if old == nil do
+        System.delete_env(key)
+      else
+        System.put_env(key, old)
+      end
+    end
+  end
 
   # Importing a corrupt export kills the global cover server, which would
   # lose every test's lib hits collected so far. Snapshot cover state
@@ -811,6 +854,7 @@ defmodule Qlover.TaskTest do
       test_paths: ["t"],
       project_root: dir,
       refs_dir: Path.join(dir, "refs"),
+      cache_dir: Path.join(dir, "cache"),
       output: Path.join(dir, "html")
     ]
   end

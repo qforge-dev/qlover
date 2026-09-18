@@ -37,6 +37,22 @@ defmodule Mix.Tasks.Qlover do
   A successful gate deletes the scratch exports so a later
   `mix test.coverage` never unions a stale partial into a full report.
 
+  ## Sharing baselines across worktrees
+
+  Every snapshot is also written through to a shared content-addressed
+  cache, and a missing or invalid local baseline is fetched from it:
+
+      QLOVER_CACHE_DIR=~/.cache/qlover  # the default (XDG-aware)
+
+  The cache key is derived from the beam hashes, gate hash, and test
+  hashes, so a hit means byte-identical content: the gate re-verifies the
+  fetched baseline against the local tree exactly as if it were local, so
+  a cache hit can never pass where a local baseline would fail. Set
+  `QLOVER_CACHE_DIR` to another directory to share across checkouts, to
+  `""` to disable the cache, or keep the default for a personal
+  cross-worktree cache. Tracer records merge the same way (per-file
+  content keys; last-writer-wins races only ever degrade to a full run).
+
   ## Test attribution
 
   Per-test-file attribution needs reference data from the compiler tracer
@@ -121,15 +137,34 @@ defmodule Mix.Tasks.Qlover do
         Keyword.get(options, :elixirc_paths, Mix.Project.config()[:elixirc_paths] || ["lib"]),
       project_root: Keyword.get(options, :project_root, File.cwd!()),
       refs_dir: Keyword.get(options, :refs_dir, Qlover.Tracer.default_dir()),
+      cache_dir: Keyword.get(options, :cache_dir, default_cache_dir()),
       output: Keyword.get(options, :output, @output_default)
     }
+  end
+
+  @doc false
+  def default_cache_dir do
+    case System.get_env("QLOVER_CACHE_DIR") do
+      nil -> default_cache_home(System.get_env("XDG_CACHE_HOME"), System.user_home())
+      "" -> nil
+      dir -> dir
+    end
+  end
+
+  @doc false
+  def default_cache_home(xdg, home) do
+    cond do
+      is_binary(xdg) -> Path.join(xdg, "qlover")
+      is_binary(home) -> Path.join([home, ".cache", "qlover"])
+      true -> nil
+    end
   end
 
   @doc false
   def check_eligible!(settings) do
     baseline = read_baseline!(settings.baseline)
 
-    if baseline.gate == gate_hash(settings.gate_paths) and
+    if baseline.gate == gate_hash(settings.gate_paths, settings.project_root) and
          test_identity?(baseline.tests, test_hashes(settings)) do
       Mix.shell().info("Qlover is eligible: gate inputs unchanged.")
       :ok
@@ -142,7 +177,7 @@ defmodule Mix.Tasks.Qlover do
   def eligible?(settings) do
     with {:ok, contents} <- File.read(settings.baseline),
          {:ok, baseline} <- decode_baseline(contents),
-         true <- baseline.gate == gate_hash(settings.gate_paths) do
+         true <- baseline.gate == gate_hash(settings.gate_paths, settings.project_root) do
       test_identity?(baseline.tests, test_hashes(settings))
     else
       _error -> false
@@ -154,9 +189,9 @@ defmodule Mix.Tasks.Qlover do
     Mix.Task.run("compile")
     {prior_tests, prior_librefs, prior_beams} = read_prior_baseline(settings)
     current = beam_hashes(settings.compile_path)
-    gate = gate_hash(settings.gate_paths)
+    gate = gate_hash(settings.gate_paths, settings.project_root)
     snapshot = build_snapshot(settings, {prior_tests, prior_librefs, prior_beams}, current, gate)
-    write_baseline_file!(settings.baseline, snapshot)
+    persist_baseline!(settings, snapshot)
     warn_unknown_refs(snapshot.tests)
     prune_records!(settings, snapshot, current)
     Mix.shell().info("Wrote qlover baseline to #{settings.baseline}.")
@@ -166,8 +201,8 @@ defmodule Mix.Tasks.Qlover do
   @doc false
   def gate!(settings) do
     Mix.Task.run("compile")
-    baseline = read_baseline!(settings.baseline)
-    gate = gate_hash(settings.gate_paths)
+    baseline = load_baseline!(settings)
+    gate = gate_hash(settings.gate_paths, settings.project_root)
 
     if baseline.gate != gate do
       Mix.raise("gate inputs changed during the stale run; run full coverage")
@@ -225,7 +260,7 @@ defmodule Mix.Tasks.Qlover do
   @doc false
   def attribution_plan(settings, baseline, current) do
     current_tests = test_hashes(settings)
-    records = decoded_records(settings)
+    records = decoded_records(settings, current_tests)
     fresh_by_rel = Map.new(records, &{&1.path, &1})
 
     Attribution.plan(%{
@@ -259,6 +294,62 @@ defmodule Mix.Tasks.Qlover do
   end
 
   @doc false
+  def load_baseline(settings) do
+    with {:ok, contents} <- File.read(settings.baseline),
+         {:ok, baseline} <- decode_baseline(contents) do
+      {:ok, baseline}
+    else
+      _error -> fetch_cached_baseline(settings)
+    end
+  end
+
+  defp fetch_cached_baseline(settings) do
+    with dir when is_binary(dir) <- settings.cache_dir,
+         current <- beam_hashes(settings.compile_path),
+         gate <- gate_hash(settings.gate_paths, settings.project_root),
+         tests <- test_hashes(settings),
+         key <- Attribution.cache_key(%{beams: current, gate: gate, tests: tests}),
+         {:ok, contents} <- File.read(cache_baseline_path(dir, key)),
+         {:ok, baseline} <- decode_baseline(contents) do
+      persist_baseline!(settings, baseline)
+      {:ok, baseline}
+    else
+      _error -> :error
+    end
+  end
+
+  defp load_baseline!(settings) do
+    case load_baseline(settings) do
+      {:ok, baseline} ->
+        baseline
+
+      :error ->
+        # Re-read the local file purely for its precise error message
+        # (missing vs invalid); the cache already missed.
+        read_baseline!(settings.baseline)
+    end
+  end
+
+  @doc false
+  def cache_key(settings) do
+    Attribution.cache_key(%{
+      beams: beam_hashes(settings.compile_path),
+      gate: gate_hash(settings.gate_paths, settings.project_root),
+      tests: test_hashes(settings)
+    })
+  end
+
+  @doc false
+  def cache_baseline_path(cache_dir, key) do
+    Path.join([cache_dir, "baselines", key <> ".term"])
+  end
+
+  @doc false
+  def cache_refs_dir(cache_dir) do
+    Path.join(cache_dir, "refs")
+  end
+
+  @doc false
   def beam_hashes(directory) do
     directory |> list_beams!() |> Map.new(&{&1, beam_hash!(directory, &1)})
   end
@@ -283,12 +374,18 @@ defmodule Mix.Tasks.Qlover do
   end
 
   @doc false
-  def gate_hash(roots) do
-    roots
-    |> Enum.flat_map(fn root -> [root | Path.wildcard(root <> "/**/*")] end)
-    |> Enum.filter(&File.regular?/1)
-    |> Enum.sort()
-    |> hash_file_list()
+  def gate_hash(roots, relative_to \\ nil) do
+    root = relative_to || File.cwd!()
+
+    payload =
+      roots
+      |> Enum.flat_map(fn r -> [r | Path.wildcard(r <> "/**/*")] end)
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.map(fn file -> {Path.relative_to(file, root), hash_file!(file)} end)
+      |> Enum.sort()
+      |> Enum.uniq()
+
+    :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)
   end
 
   @doc false
@@ -390,7 +487,7 @@ defmodule Mix.Tasks.Qlover do
     snapshot =
       build_snapshot(settings, {baseline.tests, baseline.librefs, baseline.beams}, current, gate)
 
-    write_baseline_file!(settings.baseline, snapshot)
+    persist_baseline!(settings, snapshot)
     prune_records!(settings, snapshot, current)
     _ = File.rm(settings.export_path)
     _ = File.rm(settings.expansion_export_path)
@@ -414,7 +511,7 @@ defmodule Mix.Tasks.Qlover do
 
   defp build_snapshot(settings, {prior_tests, prior_librefs, prior_beams}, current, gate) do
     current_tests = test_hashes(settings)
-    records = decoded_records(settings)
+    records = decoded_records(settings, current_tests)
     fresh_by_rel = Map.new(records, &{&1.path, &1})
 
     changed_mods =
@@ -445,10 +542,61 @@ defmodule Mix.Tasks.Qlover do
 
   defp write_snapshot_if_changed!(settings, baseline, snapshot) do
     if snapshot != baseline do
-      write_baseline_file!(settings.baseline, snapshot)
+      persist_baseline!(settings, snapshot)
     else
       :ok
     end
+  end
+
+  defp persist_baseline!(settings, snapshot) do
+    write_baseline_file!(settings.baseline, snapshot)
+    store_cached_baseline(settings, snapshot)
+    sync_cached_records(settings)
+    :ok
+  end
+
+  defp store_cached_baseline(%{cache_dir: nil}, _snapshot), do: :ok
+
+  defp store_cached_baseline(settings, snapshot) do
+    key =
+      Attribution.cache_key(%{
+        beams: snapshot.beams,
+        gate: snapshot.gate,
+        tests: snapshot.tests
+      })
+
+    path = cache_baseline_path(settings.cache_dir, key)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, :erlang.term_to_binary(snapshot, [:compressed]))
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp sync_cached_records(%{cache_dir: nil}), do: :ok
+
+  defp sync_cached_records(settings) do
+    dest = cache_refs_dir(settings.cache_dir)
+    File.mkdir_p!(dest)
+
+    case File.ls(settings.refs_dir) do
+      {:ok, entries} ->
+        Enum.each(entries, fn entry ->
+          if String.ends_with?(entry, ".term") do
+            File.cp(
+              Path.join(settings.refs_dir, entry),
+              Path.join(dest, entry)
+            )
+          end
+        end)
+
+      {:error, _reason} ->
+        :ok
+    end
+
+    :ok
+  rescue
+    _error -> :ok
   end
 
   defp warn_unknown_refs(tests) do
@@ -495,30 +643,33 @@ defmodule Mix.Tasks.Qlover do
     Path.relative_to(abs, project_root)
   end
 
-  defp decoded_records(settings) do
-    settings
-    |> list_record_entries()
-    |> Enum.flat_map(fn
-      {_filename, {:ok, record}} -> [record]
-      {_filename, :error} -> []
-    end)
+  defp decoded_records(settings, current_tests) do
+    local = list_record_entries(settings.refs_dir)
+    cache = list_cache_record_entries(settings)
+    Attribution.merge_records(local, cache, current_tests)
   end
 
-  defp list_record_entries(settings) do
-    case File.ls(settings.refs_dir) do
+  defp list_cache_record_entries(%{cache_dir: nil}), do: []
+
+  defp list_cache_record_entries(settings) do
+    list_record_entries(cache_refs_dir(settings.cache_dir))
+  end
+
+  defp list_record_entries(refs_dir) do
+    case File.ls(refs_dir) do
       {:ok, entries} ->
         entries
         |> Enum.filter(&String.ends_with?(&1, ".term"))
         |> Enum.sort()
-        |> Enum.map(&{&1, read_record(settings, &1)})
+        |> Enum.map(&{&1, read_record(refs_dir, &1)})
 
       {:error, _reason} ->
         []
     end
   end
 
-  defp read_record(settings, entry) do
-    with {:ok, contents} <- File.read(Path.join(settings.refs_dir, entry)),
+  defp read_record(refs_dir, entry) do
+    with {:ok, contents} <- File.read(Path.join(refs_dir, entry)),
          {:ok, record} <- Attribution.decode_record(contents) do
       {:ok, record}
     else
@@ -527,7 +678,7 @@ defmodule Mix.Tasks.Qlover do
   end
 
   defp prune_records!(settings, snapshot, current) do
-    entries = list_record_entries(settings)
+    entries = list_record_entries(settings.refs_dir)
     current_files = MapSet.new(Map.keys(snapshot.tests))
 
     beamed =
@@ -597,11 +748,6 @@ defmodule Mix.Tasks.Qlover do
 
   defp hash_file!(path) do
     :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)
-  end
-
-  defp hash_file_list(files) do
-    payload = Enum.map(files, fn file -> {file, hash_file!(file)} end)
-    :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)
   end
 
   defp enforce_beam_results!(results) do
