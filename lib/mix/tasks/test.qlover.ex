@@ -56,6 +56,9 @@ defmodule Mix.Tasks.Test.Qlover do
   values are labelled rather than estimated. Older baselines receive one
   full run to collect counts.
 
+  Coverage percentages are rounded down to two decimals so incomplete
+  coverage never displays as `100.00%`. Threshold checks use exact counts.
+
   ## The `--qlover` flag spelling
 
   Mix does not let dependencies add flags to `mix test`, but the same
@@ -158,7 +161,9 @@ defmodule Mix.Tasks.Test.Qlover do
           "--no-start",
           "--no-compile",
           "-e",
-          "Qlover.TestCounts.install(#{inspect(path)}); Mix.Task.run(\"test\", System.argv())",
+          "Qlover.TestCounts.install(#{inspect(path)}); " <>
+            "coverage = Qlover.Coverage.prepare(System.argv()); " <>
+            "Mix.Task.run(\"test\", System.argv()); Qlover.Coverage.finish(coverage)",
           "--" | args
         ])
 

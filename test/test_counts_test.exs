@@ -305,6 +305,22 @@ defmodule Qlover.TestCountsTest do
     {deleted, code} = run.(["test.qlover"])
     assert code == 0, deleted
     assert deleted =~ "qlover: ran 0 tests; didn't run 4 tests."
+
+    File.rm!(Path.join(dir, "cover/.qlover_baseline"))
+
+    File.write!(Path.join(dir, "lib/uncovered.ex"), """
+    defmodule CountsDemo.Uncovered do
+      def missed, do: :never_called
+    end
+    """)
+
+    {incomplete, code} = run.(["test.qlover"])
+    assert code != 0
+    assert incomplete =~ "Coverage test failed, threshold not met:"
+    assert incomplete =~ "    Coverage:  50.00%"
+    assert incomplete =~ "    Threshold: 100.00%"
+    assert incomplete =~ "qlover: ran 4 tests; didn't run 0 tests."
+    refute File.exists?(Path.join(dir, "cover/.qlover_baseline"))
   end
 
   defp settings(dir) do

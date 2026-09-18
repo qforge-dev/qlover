@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Round coverage percentages down to two decimals in `mix test.qlover`,
+  so coverage below 100% displays as `99.99%` rather than `100.00%`.
+  Threshold checks still use exact counts.
+
 ## [0.1.1] - 2026-09-18
 
 ### Added
