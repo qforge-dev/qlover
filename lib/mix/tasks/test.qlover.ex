@@ -28,9 +28,12 @@ defmodule Mix.Tasks.Test.Qlover do
   Extra arguments are appended to the selection (`mix test.qlover --seed
   0`); extra *file* arguments widen it, which stays sound because all
   coverage still comes from one code version. `--no-stale` forces a full
-  suite run and refreshes the baseline. The flags `--stale`, `--cover`,
-  `--no-cover`, `--export-coverage`, `--failed`, `--partitions`, `--dry-run`,
-  `--no-compile` are managed by the task and rejected when passed explicitly.
+  suite run and refreshes the baseline. `--dry` compiles pending changes and
+  prints the files qlover would select, with their selection reasons, without
+  running tests or updating the coverage baseline. The flags `--stale`,
+  `--cover`, `--no-cover`, `--export-coverage`, `--failed`, `--partitions`,
+  `--dry-run`, `--no-compile` are managed by the task and rejected when passed
+  explicitly.
 
   Path overrides (mirroring `mix qlover`):
 
@@ -89,6 +92,7 @@ defmodule Mix.Tasks.Test.Qlover do
   @managed_flags [
     "--stale",
     "--no-stale",
+    "--dry",
     "--cover",
     "--no-cover",
     "--failed",
@@ -98,6 +102,14 @@ defmodule Mix.Tasks.Test.Qlover do
     "--export-coverage"
   ]
   @managed_prefixes ["--export-coverage=", "--partitions="]
+  @dry_reasons %{
+    baseline: "there is no valid baseline",
+    no_stale: "--no-stale forces a full run",
+    test_counts: "the baseline has no test counts",
+    gate_inputs: "gate inputs changed",
+    test_fixtures: "test fixtures or helpers changed",
+    unattributed: "changed tests have no reference data"
+  }
 
   @impl Mix.Task
   def run(args), do: run(args, [])
@@ -114,28 +126,17 @@ defmodule Mix.Tasks.Test.Qlover do
     {flags, test_args} = split_args!(args)
     settings = Qlover.settings(options, flags)
     runner = Keyword.get(options, :test_runner, &default_runner/1)
-    _ = File.rm(settings.export_path)
-    _ = File.rm(settings.expansion_export_path)
 
     Mix.Task.run("compile")
 
-    case Qlover.load_baseline(settings) do
-      :error ->
-        Mix.shell().info(first_run_message(settings))
-        run_full!(settings, runner, test_args, %{})
+    selection = selection_plan(settings, flags)
 
-      {:ok, baseline} ->
-        if Keyword.get(flags, :no_stale, false) do
-          Mix.shell().info("qlover: --no-stale requested, running full suite...")
-          run_full!(settings, runner, test_args, baseline)
-        else
-          if Map.has_key?(baseline, :test_counts) do
-            run_incremental_or_full!(settings, runner, test_args, baseline)
-          else
-            Mix.shell().info("qlover: recording test counts, running full suite...")
-            run_full!(settings, runner, test_args, baseline)
-          end
-        end
+    if Keyword.get(flags, :dry, false) do
+      print_dry_plan(selection, settings, test_args)
+    else
+      _ = File.rm(settings.export_path)
+      _ = File.rm(settings.expansion_export_path)
+      execute_plan(selection, settings, runner, test_args)
     end
   end
 
@@ -203,6 +204,10 @@ defmodule Mix.Tasks.Test.Qlover do
     extract_flags(rest, Keyword.put(flags, :no_stale, true), test_args)
   end
 
+  defp extract_flags(["--dry" | rest], flags, test_args) do
+    extract_flags(rest, Keyword.put(flags, :dry, true), test_args)
+  end
+
   defp extract_flags(["--baseline=" <> path | rest], flags, test_args) do
     extract_flags(rest, Keyword.put(flags, :baseline, path), test_args)
   end
@@ -231,22 +236,51 @@ defmodule Mix.Tasks.Test.Qlover do
     Path.basename(path, ".coverdata")
   end
 
-  defp run_incremental_or_full!(settings, runner, test_args, baseline) do
-    if baseline.gate != Qlover.gate_hash(settings.gate_paths, settings.project_root) do
-      Mix.shell().info(first_run_message(settings))
-      run_full!(settings, runner, test_args, baseline)
-    else
-      current = Qlover.beam_hashes(settings.compile_path)
+  defp selection_plan(settings, flags) do
+    persist? = not Keyword.get(flags, :dry, false)
 
-      case Qlover.attribution_plan(settings, baseline, current) do
-        {:full, reason} ->
-          Mix.shell().info(attribution_fallback_message(reason))
-          run_full!(settings, runner, test_args, baseline)
+    case Qlover.load_baseline(settings, persist: persist?) do
+      :error ->
+        {:full, :baseline, %{}}
 
-        {:incremental, %{prove: prove, run: run}} ->
-          run_focused!(settings, runner, test_args, prove, run, baseline)
-      end
+      {:ok, baseline} ->
+        select_with_baseline(settings, flags, baseline)
     end
+  end
+
+  defp select_with_baseline(settings, flags, baseline) do
+    cond do
+      Keyword.get(flags, :no_stale, false) ->
+        {:full, :no_stale, baseline}
+
+      not Map.has_key?(baseline, :test_counts) ->
+        {:full, :test_counts, baseline}
+
+      baseline.gate != Qlover.gate_hash(settings.gate_paths, settings.project_root) ->
+        {:full, :gate_inputs, baseline}
+
+      true ->
+        current = Qlover.beam_hashes(settings.compile_path)
+
+        case Qlover.attribution_plan_with_reasons(settings, baseline, current) do
+          {:full, reason} -> {:full, reason, baseline}
+          {:incremental, plan} -> {:incremental, plan, baseline}
+        end
+    end
+  end
+
+  defp execute_plan({:full, reason, baseline}, settings, runner, test_args) do
+    Mix.shell().info(full_run_message(reason, settings))
+    run_full!(settings, runner, test_args, baseline)
+  end
+
+  defp execute_plan(
+         {:incremental, %{prove: prove, run: run}, baseline},
+         settings,
+         runner,
+         test_args
+       ) do
+    run_focused!(settings, runner, test_args, prove, run, baseline)
   end
 
   defp run_full!(settings, runner, test_args, baseline) do
@@ -306,6 +340,60 @@ defmodule Mix.Tasks.Test.Qlover do
 
   defp attribution_fallback_message(:unattributed) do
     "qlover: test changes need full attribution, running full suite..."
+  end
+
+  defp full_run_message(:baseline, settings), do: first_run_message(settings)
+
+  defp full_run_message(:no_stale, _settings) do
+    "qlover: --no-stale requested, running full suite..."
+  end
+
+  defp full_run_message(:test_counts, _settings) do
+    "qlover: recording test counts, running full suite..."
+  end
+
+  defp full_run_message(:gate_inputs, settings), do: first_run_message(settings)
+  defp full_run_message(reason, _settings), do: attribution_fallback_message(reason)
+
+  defp print_dry_plan({:full, reason, _baseline}, settings, test_args) do
+    files = TestCounts.test_files(settings)
+
+    Mix.shell().info("qlover: dry run selects the full suite because #{dry_reason(reason)}.")
+    print_dry_files(files)
+    print_test_args(test_args)
+    :ok
+  end
+
+  defp print_dry_plan({:incremental, plan, _baseline}, _settings, test_args) do
+    Mix.shell().info("qlover: dry run would run #{length(plan.run)} focused test file(s):")
+
+    Enum.each(plan.run, fn file ->
+      Mix.shell().info("  #{file} (#{format_reason(plan.reasons[file])})")
+    end)
+
+    print_test_args(test_args)
+    :ok
+  end
+
+  defp print_dry_files(files) do
+    Mix.shell().info("qlover: would run #{length(files)} test file(s):")
+    Enum.each(files, &Mix.shell().info("  #{&1}"))
+  end
+
+  defp print_test_args([]), do: :ok
+
+  defp print_test_args(args) do
+    Mix.shell().info("qlover: additional Mix test arguments: #{Enum.join(args, " ")}")
+  end
+
+  defp dry_reason(reason), do: Map.fetch!(@dry_reasons, reason)
+
+  defp format_reason(%{changed: true, modules: []}), do: "changed test file"
+
+  defp format_reason(%{changed: changed, modules: modules}) do
+    prefix = if changed, do: "changed test file; ", else: ""
+    names = Enum.map_join(modules, ", ", &String.replace_prefix(&1, "Elixir.", ""))
+    prefix <> "references affected modules: " <> names
   end
 
   defp finish_run!(settings, baseline, result, next) do

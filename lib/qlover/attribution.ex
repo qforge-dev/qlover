@@ -320,6 +320,44 @@ defmodule Qlover.Attribution do
     end
   end
 
+  @doc false
+  def explain_plan(input) do
+    case plan(input) do
+      {:incremental, plan} ->
+        diff = diff_tests(input.baseline_tests, input.current_tests)
+
+        changed =
+          (diff.added ++ diff.modified)
+          |> Enum.filter(&code_file?/1)
+          |> MapSet.new()
+
+        affected =
+          (Enum.map(plan.prove, &beam_module_string/1) ++ Map.get(input, :beam_deleted, []))
+          |> MapSet.new()
+
+        reasons =
+          Map.new(plan.run, fn file ->
+            changed? = MapSet.member?(changed, file)
+
+            old_modules =
+              if changed?, do: get_in(input.baseline_tests, [file, :modules]) || [], else: []
+
+            modules =
+              (Map.get(input.union_refs, file, []) ++ old_modules)
+              |> Enum.uniq()
+              |> Enum.filter(&MapSet.member?(affected, &1))
+              |> Enum.sort()
+
+            {file, %{changed: changed?, modules: modules}}
+          end)
+
+        {:incremental, Map.put(plan, :reasons, reasons)}
+
+      full ->
+        full
+    end
+  end
+
   defp unknown_refs?(baseline_tests, rel) do
     case Map.fetch(baseline_tests, rel) do
       {:ok, %{modules: modules}} when is_list(modules) -> false

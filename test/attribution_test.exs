@@ -611,4 +611,47 @@ defmodule Qlover.AttributionTest do
                 test_changed: true
               }}
   end
+
+  test "explain_plan identifies changed files and affected-module referencers" do
+    input = %{
+      beam_changed: [],
+      current_beams: %{"Elixir.H.beam" => "1"},
+      baseline_tests: %{
+        "t/a.exs" => %{sha: "1", modules: ["Elixir.H"]},
+        "t/b.exs" => %{sha: "1", modules: ["Elixir.H"]}
+      },
+      current_tests: %{"t/a.exs" => "2", "t/b.exs" => "1", "t/new.exs" => "3"},
+      union_refs: %{
+        "t/a.exs" => [],
+        "t/b.exs" => ["Elixir.H"],
+        "t/new.exs" => []
+      },
+      lib_edges: %{},
+      fresh_lib_edges: %{},
+      compiled_dirs: [],
+      project_root: "/repo"
+    }
+
+    assert {:incremental, plan} = Attribution.explain_plan(input)
+    assert plan.run == ["t/a.exs", "t/b.exs", "t/new.exs"]
+    assert plan.reasons["t/a.exs"] == %{changed: true, modules: ["Elixir.H"]}
+    assert plan.reasons["t/b.exs"] == %{changed: false, modules: ["Elixir.H"]}
+    assert plan.reasons["t/new.exs"] == %{changed: true, modules: []}
+  end
+
+  test "explain_plan preserves full-suite fallbacks" do
+    input = %{
+      beam_changed: [],
+      current_beams: %{},
+      baseline_tests: %{},
+      current_tests: %{"t/data.json" => "1"},
+      union_refs: %{},
+      lib_edges: %{},
+      fresh_lib_edges: %{},
+      compiled_dirs: [],
+      project_root: "/repo"
+    }
+
+    assert Attribution.explain_plan(input) == {:full, :test_fixtures}
+  end
 end

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `mix test.qlover --dry` to print the planned test files and their selection
+  reasons without executing tests or updating the coverage baseline.
+
+### Fixed
+
+- Silence cover's `Analysis includes data from imported files` notice, which
+  the incremental gate emitted once for every proven module.
+
 ## [0.1.3] - 2026-09-18
 
 ### Added

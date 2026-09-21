@@ -261,11 +261,24 @@ defmodule Mix.Tasks.Qlover do
 
   @doc false
   def attribution_plan(settings, baseline, current) do
+    settings
+    |> attribution_input(baseline, current)
+    |> Attribution.plan()
+  end
+
+  @doc false
+  def attribution_plan_with_reasons(settings, baseline, current) do
+    settings
+    |> attribution_input(baseline, current)
+    |> Attribution.explain_plan()
+  end
+
+  defp attribution_input(settings, baseline, current) do
     current_tests = test_hashes(settings)
     records = decoded_records(settings, current_tests)
     fresh_by_rel = Map.new(records, &{&1.path, &1})
 
-    Attribution.plan(%{
+    %{
       beam_changed: changed_beams(baseline.beams, current),
       beam_deleted: deleted_beams(baseline.beams, current),
       current_beams: current,
@@ -277,7 +290,7 @@ defmodule Mix.Tasks.Qlover do
         Attribution.filter_lib_edges(Attribution.group_by_defined(records), current),
       compiled_dirs: expand_dirs(settings.elixirc_paths, settings.project_root),
       project_root: settings.project_root
-    })
+    }
   end
 
   @doc false
@@ -296,16 +309,16 @@ defmodule Mix.Tasks.Qlover do
   end
 
   @doc false
-  def load_baseline(settings) do
+  def load_baseline(settings, options \\ []) do
     with {:ok, contents} <- File.read(settings.baseline),
          {:ok, baseline} <- decode_baseline(contents) do
       {:ok, baseline}
     else
-      _error -> fetch_cached_baseline(settings)
+      _error -> fetch_cached_baseline(settings, Keyword.get(options, :persist, true))
     end
   end
 
-  defp fetch_cached_baseline(settings) do
+  defp fetch_cached_baseline(settings, persist?) do
     with dir when is_binary(dir) <- settings.cache_dir,
          current <- beam_hashes(settings.compile_path),
          gate <- gate_hash(settings.gate_paths, settings.project_root),
@@ -313,7 +326,7 @@ defmodule Mix.Tasks.Qlover do
          key <- Attribution.cache_key(%{beams: current, gate: gate, tests: tests}),
          {:ok, contents} <- File.read(cache_baseline_path(dir, key)),
          {:ok, baseline} <- decode_baseline(contents) do
-      persist_baseline!(settings, baseline)
+      if persist?, do: persist_baseline!(settings, baseline)
       {:ok, baseline}
     else
       _error -> :error
@@ -471,6 +484,38 @@ defmodule Mix.Tasks.Qlover do
     :ok
   end
 
+  @doc false
+  def quiet_cover(fun) do
+    # cover announces "Analysis includes data from imported files" through the
+    # group leader of its server process, once for every analysed module. A
+    # gate over an imported export analyses every proven module, so that
+    # notice floods the output. Point the server's group leader at a
+    # throwaway IO server for the duration; the server spawns its analysis
+    # workers from itself, so they inherit the silent leader.
+    server = Process.whereis(:cover_server)
+    {:group_leader, original} = Process.info(server, :group_leader)
+    sink = spawn(fn -> cover_sink() end)
+
+    try do
+      :erlang.group_leader(sink, server)
+      fun.()
+    after
+      :erlang.group_leader(original, server)
+      send(sink, :stop)
+    end
+  end
+
+  defp cover_sink do
+    receive do
+      {:io_request, from, reply_as, _request} ->
+        send(from, {:io_reply, reply_as, :ok})
+        cover_sink()
+
+      :stop ->
+        :ok
+    end
+  end
+
   defp gate_proven!(settings, baseline, current, gate, prove) do
     ensure_cover!(settings.compile_path)
     imported = import_fresh_exports!(settings)
@@ -482,9 +527,9 @@ defmodule Mix.Tasks.Qlover do
       )
     end
 
-    results = Enum.map(prove, &cover_result/1)
+    results = quiet_cover(fn -> Enum.map(prove, &cover_result/1) end)
     enforce_full_coverage!(results)
-    write_module_html!(Enum.map(results, &elem(&1, 0)), settings.output)
+    quiet_cover(fn -> write_module_html!(Enum.map(results, &elem(&1, 0)), settings.output) end)
 
     snapshot =
       build_snapshot(settings, {baseline.tests, baseline.librefs, baseline.beams}, current, gate)

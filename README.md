@@ -122,6 +122,11 @@ also falls back to the full suite.
 Use `mix test.qlover --no-stale` to force a full suite run and refresh the
 baseline.
 
+Use `mix test.qlover --dry` to compile pending changes and print the exact test
+files qlover would select without running tests or updating the coverage
+baseline. Focused selections explain whether each file changed directly or
+references an affected module; full-suite selections print the fallback cause.
+
 Requires Elixir 1.18 or newer and a **100% coverage policy**. Ordinary
 `mix test` and `mix test test/my_test.exs` remain available for your usual
 test workflow.

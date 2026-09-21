@@ -113,7 +113,8 @@ defmodule Qlover.TestCounts do
   defp number(nil), do: "unknown"
   defp number(n), do: to_string(n)
 
-  defp test_files(settings) do
+  @doc false
+  def test_files(settings) do
     project = Mix.Project.config()
     filters = project[:test_load_filters]
     pattern = project[:test_pattern] || if(filters, do: "*.{ex,exs}", else: "*_test.exs")

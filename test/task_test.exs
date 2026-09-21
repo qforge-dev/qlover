@@ -121,6 +121,19 @@ defmodule Qlover.TaskTest do
     refute File.exists?(opts[:export_path])
   end
 
+  test "hides cover's imported-file notice while gating", %{tmp_dir: dir} do
+    {module, _beam} = compile_beam!(dir, "Quiet", "  def a, do: :ok\n")
+    opts = task_opts(dir)
+
+    assert :ok = Qlover.run(["--write-baseline"], opts)
+
+    {_mod, beam} = compile_beam!(dir, "Quiet", "  def a, do: :okay\n")
+    fresh_export!(beam, opts[:export_path], module, [:a])
+
+    output = capture_cover_io(fn -> assert :ok = Qlover.run([], opts) end)
+    refute output =~ "imported files"
+  end
+
   test "rejects changed beams with partial fresh coverage", %{tmp_dir: dir} do
     compile_beam!(dir, "Partial", "  def a, do: :ok\n")
     opts = task_opts(dir)
@@ -854,6 +867,24 @@ defmodule Qlover.TaskTest do
       :ok = :cover.import(String.to_charlist(snapshot))
       File.rm(snapshot)
     end
+  end
+
+  # cover writes through its server's group leader, not the caller's, so
+  # point that leader at a StringIO to observe what the server emits.
+  defp capture_cover_io(fun) do
+    server = Process.whereis(:cover_server)
+    {:group_leader, original} = Process.info(server, :group_leader)
+    {:ok, sink} = StringIO.open("")
+
+    try do
+      :erlang.group_leader(sink, server)
+      fun.()
+    after
+      :erlang.group_leader(original, server)
+    end
+
+    {_input, output} = StringIO.contents(sink)
+    output
   end
 
   defp cover_beams(directory) do

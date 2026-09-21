@@ -40,6 +40,10 @@ defmodule Qlover.TestTaskTest do
     {no_stale_flags, no_stale_rest} = TestQlover.split_args!(["--no-stale", "--seed", "0"])
     assert no_stale_flags[:no_stale]
     assert no_stale_rest == ["--seed", "0"]
+
+    {dry_flags, dry_rest} = TestQlover.split_args!(["--dry", "--trace"])
+    assert dry_flags[:dry]
+    assert dry_rest == ["--trace"]
   end
 
   test "split_args! rejects flags managed by the task" do
@@ -123,6 +127,71 @@ defmodule Qlover.TestTaskTest do
 
     assert_received {:test_cmd, ["test", "--no-stale", "--cover"]}
     assert File.regular?(opts[:baseline])
+  end
+
+  test "--dry prints a full-suite plan without running tests", %{tmp_dir: dir} do
+    opts = task_opts(dir)
+    first = write_test!(dir, "first_test.exs", "# first\n")
+    second = write_test!(dir, "second_test.exs", "# second\n")
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok =
+                 TestQlover.run(
+                   ["--dry"],
+                   Keyword.put(opts, :test_runner, fn _ -> flunk("test runner was called") end)
+                 )
+      end)
+
+    assert output =~ "dry run selects the full suite because there is no valid baseline"
+    assert output =~ "would run 2 test file(s)"
+    assert output =~ first
+    assert output =~ second
+    refute File.exists?(opts[:baseline])
+  end
+
+  test "--dry explains a focused plan and preserves coverage state", %{tmp_dir: dir} do
+    {module, _beam} = compile_beam!(dir, "Dry", "  def a, do: :ok\n")
+    opts = task_opts(dir)
+    first = write_test!(dir, "first_test.exs", "# before\n")
+    second = write_test!(dir, "second_test.exs", "# same\n")
+    module_name = Atom.to_string(module)
+
+    write_baseline_map!(opts, %{
+      vsn: 4,
+      beams: Qlover.beam_hashes(opts[:compile_path]),
+      gate: Qlover.gate_hash(opts[:gate_paths], opts[:project_root]),
+      tests: %{
+        first => %{sha: file_sha!(dir, first), modules: [module_name]},
+        second => %{sha: file_sha!(dir, second), modules: [module_name]}
+      },
+      librefs: %{}
+    })
+
+    write_test!(dir, "first_test.exs", "# after\n")
+    third = write_test!(dir, "third_test.exs", "# added\n")
+    write_record!(opts, first, [module_name])
+    baseline = File.read!(opts[:baseline])
+    File.write!(opts[:export_path], "keep fresh")
+    File.write!(opts[:expansion_export_path], "keep expansion")
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok =
+                 TestQlover.run(
+                   ["--dry", "--seed", "0"],
+                   Keyword.put(opts, :test_runner, fn _ -> flunk("test runner was called") end)
+                 )
+      end)
+
+    assert output =~ "would run 3 focused test file(s)"
+    assert output =~ "#{first} (changed test file; references affected modules: QloverFixDry)"
+    assert output =~ "#{second} (references affected modules: QloverFixDry)"
+    assert output =~ "#{third} (changed test file)"
+    assert output =~ "additional Mix test arguments: --seed 0"
+    assert File.read!(opts[:baseline]) == baseline
+    assert File.read!(opts[:export_path]) == "keep fresh"
+    assert File.read!(opts[:expansion_export_path]) == "keep expansion"
   end
 
   test "focused run failure aborts before gating", %{tmp_dir: dir} do
@@ -541,6 +610,20 @@ defmodule Qlover.TestTaskTest do
     })
 
     File.read!(opts[:baseline])
+  end
+
+  defp write_record!(opts, rel, modules) do
+    File.mkdir_p!(opts[:refs_dir])
+
+    record = %{
+      path: rel,
+      sha: file_sha!(opts[:project_root], rel),
+      modules: modules,
+      defined: []
+    }
+
+    filename = Elixir.Qlover.Attribution.record_filename(rel)
+    File.write!(Path.join(opts[:refs_dir], filename), :erlang.term_to_binary(record))
   end
 
   defp task_opts(dir) do

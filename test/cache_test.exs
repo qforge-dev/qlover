@@ -75,6 +75,17 @@ defmodule Qlover.CacheTest do
     assert File.regular?(opts_b[:baseline])
   end
 
+  test "a cached baseline can be loaded without persisting it", %{tmp_dir: dir} do
+    {opts_a, opts_b} = mirror_opts(dir)
+    settings_b = Qlover.settings(opts_b, [])
+
+    assert :ok = Qlover.run(["--write-baseline"], opts_a)
+    refute File.exists?(opts_b[:baseline])
+
+    assert {:ok, %{vsn: 4}} = Qlover.load_baseline(settings_b, persist: false)
+    refute File.exists?(opts_b[:baseline])
+  end
+
   test "divergent content misses the cache", %{tmp_dir: dir} do
     {opts_a, opts_b} = mirror_opts(dir)
 
