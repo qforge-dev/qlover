@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Runtime-attributed line coverage for `mix test.qlover` on OTP 29 and Elixir
+  1.20.2–1.20.x: changed test files replace their own hits while unchanged files'
+  valid hits remain reusable. Coverage loss fails without advancing the baseline.
+- Versioned executable-line inventories, separate suite-level evidence, spawn
+  ancestry for async tasks, source/dependency fingerprints, atomic cache writes,
+  attributed HTML reports, and a zero-test gate for unreferenced new modules.
+- End-to-end regressions for edits, deletions, async tasks, lifecycle callbacks,
+  worktree caches, source shifts, and missing coverage; native-cover parity and
+  a repeatable small-fixture benchmark.
+
+### Changed
+
+- Legacy baselines receive one full attributed refresh on supported runtimes.
+  Other Elixir runtimes retain the conservative native-cover path.
+- Filtered or skipped test executions cannot establish reusable attributed
+  coverage; ambiguous worker hits are not reused as test-file evidence.
+
 ## [0.1.4] - 2026-09-21
 
 ### Added

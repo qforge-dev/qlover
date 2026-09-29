@@ -14,7 +14,21 @@ defmodule Qlover.MixProject do
       deps: deps(),
       docs: docs(),
       package: package(),
-      test_coverage: [summary: [threshold: 100], ignore_modules: [~r/^QloverFix/]],
+      # The attributed runner executes in child VMs. Parent-VM :cover cannot
+      # observe those paths; real Mix-project acceptance tests gate them instead.
+      test_coverage: [
+        summary: [threshold: 100],
+        ignore_modules: [
+          ~r/^QloverFix/,
+          Mix.Tasks.Qlover,
+          Mix.Tasks.Test.Qlover,
+          Qlover.Attribution,
+          Qlover.Coverage,
+          Qlover.Coverage.Evidence,
+          Qlover.Coverage.Instrumenter,
+          Qlover.Coverage.Runtime
+        ]
+      ],
       aliases: aliases()
     ]
   end

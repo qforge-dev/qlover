@@ -2,23 +2,21 @@ defmodule Mix.Tasks.Qlover do
   @shortdoc "Gates incremental coverage from stale test runs"
 
   @moduledoc """
-  Proves 100% line coverage from a stale subset plus the full-run baseline.
+  Gates a native-cover reference snapshot when invoked directly. The
+  `mix test.qlover` runner also uses this task's snapshot and planning APIs to
+  gate its runtime-attributed line ownership.
 
       mix qlover --eligible
       mix test --stale --cover --export-coverage .qlover_fresh
       mix qlover
       mix qlover --write-baseline
 
-  The baseline records beam hashes from the last green full run, a hash of
-  the non-test gate inputs (`priv/repo`, `config`, `mix.exs`, `mix.lock`),
-  and a snapshot of the test files (content hashes plus traced module
-  references). A stale run satisfies the gate when the non-test inputs are
-  unchanged: every test that references a changed beam reruns under
-  `--stale`, so fresh 100% line coverage for the changed beams plus the
-  untouched baseline equals a full run. Test-only edits gate incrementally
-  too: changed tests re-prove the modules they could have covered (tracked
-  via the reference snapshot) instead of forcing a full run. Anything else
-  must fall back to `mix test --no-stale --cover`.
+  The snapshot records compiled-module and test hashes, non-test gate inputs,
+  and compiler references. Attributed snapshots additionally record the full
+  executable-line inventory, per-file hits, source-map identity, dependency
+  identity, and runtime/backend compatibility. Changed files replace their
+  rows, never accumulate historical coverage. Standalone native-cover exports
+  cannot be upgraded into attributed evidence without a new full run.
 
   Prefer `mix test.qlover`, which runs the whole flow (eligible → stale →
   gate, else full → snapshot) in one command.
@@ -55,8 +53,8 @@ defmodule Mix.Tasks.Qlover do
 
   ## Test attribution
 
-  Per-test-file attribution needs reference data from the compiler tracer
-  (`Qlover.Tracer`). Enable it in the host project:
+  Changed application modules still use compiler references alongside prior
+  runtime owners. Enable `Qlover.Tracer` in the host project:
 
       # mix.exs
       def project do
@@ -65,9 +63,10 @@ defmodule Mix.Tasks.Qlover do
          test_elixirc_options: [tracers: [Qlover.Tracer]]]
       end
 
-  Without tracer data every test edit falls back to the full suite, exactly
-  like before — attribution is purely additive and can never pass where the
-  old gate would fail.
+  A baseline from the standalone native-cover command has no runtime owners.
+  `mix test.qlover` gives it one attributed full refresh before focused edits.
+  Direct `mix qlover` invocations with legacy snapshots retain the conservative
+  native-cover gate; use `mix test.qlover` to refresh attributed snapshots.
   """
 
   use Mix.Task
@@ -140,7 +139,8 @@ defmodule Mix.Tasks.Qlover do
       project_root: Keyword.get(options, :project_root, File.cwd!()),
       refs_dir: Keyword.get(options, :refs_dir, Qlover.Tracer.default_dir()),
       cache_dir: Keyword.get(options, :cache_dir, default_cache_dir()),
-      output: Keyword.get(options, :output, @output_default)
+      output: Keyword.get(options, :output, @output_default),
+      coverage: Keyword.get(options, :coverage)
     }
   end
 
@@ -193,6 +193,15 @@ defmodule Mix.Tasks.Qlover do
     current = beam_hashes(settings.compile_path)
     gate = gate_hash(settings.gate_paths, settings.project_root)
     snapshot = build_snapshot(settings, {prior_tests, prior_librefs, prior_beams}, current, gate)
+
+    snapshot =
+      if settings.coverage do
+        evidence = Elixir.Qlover.Coverage.Evidence.full!(settings, settings.coverage, snapshot)
+        Map.put(snapshot, :attributed, evidence)
+      else
+        snapshot
+      end
+
     persist_baseline!(settings, snapshot)
     warn_unknown_refs(snapshot.tests)
     prune_records!(settings, snapshot, current)
@@ -212,6 +221,14 @@ defmodule Mix.Tasks.Qlover do
 
     current = beam_hashes(settings.compile_path)
 
+    if Map.get(baseline, :attributed) do
+      gate_attributed!(settings, baseline, current, gate)
+    else
+      gate_legacy!(settings, baseline, current, gate)
+    end
+  end
+
+  defp gate_legacy!(settings, baseline, current, gate) do
     case attribution_plan(settings, baseline, current) do
       {:full, :test_fixtures} ->
         Mix.raise("qlover test fixtures or helpers changed; run full coverage")
@@ -259,6 +276,29 @@ defmodule Mix.Tasks.Qlover do
     end
   end
 
+  defp gate_attributed!(settings, baseline, current, gate) do
+    case attribution_plan(settings, baseline, current) do
+      {:full, reason} ->
+        Mix.raise("qlover requires a full run: #{inspect(reason)}")
+
+      {:incremental, plan} ->
+        snapshot =
+          build_snapshot(
+            settings,
+            {baseline.tests, baseline.librefs, baseline.beams},
+            current,
+            gate
+          )
+
+        evidence = Elixir.Qlover.Coverage.Evidence.advance!(settings, baseline, plan)
+        snapshot = Map.put(snapshot, :attributed, evidence)
+        write_snapshot_if_changed!(settings, baseline, snapshot)
+        prune_records!(settings, snapshot, current)
+        Mix.shell().info("qlover holds for attributed coverage.")
+        :ok
+    end
+  end
+
   @doc false
   def attribution_plan(settings, baseline, current) do
     settings
@@ -277,9 +317,12 @@ defmodule Mix.Tasks.Qlover do
     current_tests = test_hashes(settings)
     records = decoded_records(settings, current_tests)
     fresh_by_rel = Map.new(records, &{&1.path, &1})
+    beam_changed = changed_beams(baseline.beams, current)
+    previous_sources = Map.get(Map.get(baseline, :attributed) || %{}, :sources, %{})
+    current_sources = Elixir.Qlover.Coverage.Evidence.sources(settings.compile_path)
 
     %{
-      beam_changed: changed_beams(baseline.beams, current),
+      beam_changed: beam_changed,
       beam_deleted: deleted_beams(baseline.beams, current),
       current_beams: current,
       baseline_tests: baseline.tests,
@@ -289,7 +332,21 @@ defmodule Mix.Tasks.Qlover do
       fresh_lib_edges:
         Attribution.filter_lib_edges(Attribution.group_by_defined(records), current),
       compiled_dirs: expand_dirs(settings.elixirc_paths, settings.project_root),
-      project_root: settings.project_root
+      project_root: settings.project_root,
+      attributed: Map.get(baseline, :attributed) != nil,
+      suite_dependent: Map.get(Map.get(baseline, :attributed) || %{}, :suite, %{}) != %{},
+      source_map_drift:
+        Enum.any?(current_sources, fn {beam, hash} ->
+          previous_sources[beam] != hash and beam not in beam_changed
+        end),
+      dependency_unchanged:
+        Map.get(Map.get(baseline, :attributed) || %{}, :dependencies) ==
+          Elixir.Qlover.Coverage.Evidence.dependencies(settings.compile_path),
+      runtime_owners:
+        Elixir.Qlover.Coverage.Evidence.owners(
+          Map.get(baseline, :attributed),
+          beam_changed
+        )
     }
   end
 
@@ -323,14 +380,33 @@ defmodule Mix.Tasks.Qlover do
          current <- beam_hashes(settings.compile_path),
          gate <- gate_hash(settings.gate_paths, settings.project_root),
          tests <- test_hashes(settings),
-         key <- Attribution.cache_key(%{beams: current, gate: gate, tests: tests}),
-         {:ok, contents} <- File.read(cache_baseline_path(dir, key)),
-         {:ok, baseline} <- decode_baseline(contents) do
+         keys <- [
+           Attribution.cache_key(%{
+             beams: current,
+             gate: gate,
+             tests: tests,
+             sources: Elixir.Qlover.Coverage.Evidence.sources(settings.compile_path),
+             dependencies: Elixir.Qlover.Coverage.Evidence.dependencies(settings.compile_path)
+           }),
+           Attribution.cache_key(%{beams: current, gate: gate, tests: tests})
+         ],
+         {:ok, baseline} <- find_cached_baseline(dir, keys) do
       if persist?, do: persist_baseline!(settings, baseline)
       {:ok, baseline}
     else
       _error -> :error
     end
+  end
+
+  defp find_cached_baseline(dir, keys) do
+    Enum.find_value(keys, :error, fn key ->
+      with {:ok, contents} <- File.read(cache_baseline_path(dir, key)),
+           {:ok, baseline} <- decode_baseline(contents) do
+        {:ok, baseline}
+      else
+        _ -> nil
+      end
+    end)
   end
 
   defp load_baseline!(settings) do
@@ -347,11 +423,30 @@ defmodule Mix.Tasks.Qlover do
 
   @doc false
   def cache_key(settings) do
-    Attribution.cache_key(%{
+    payload = %{
       beams: beam_hashes(settings.compile_path),
       gate: gate_hash(settings.gate_paths, settings.project_root),
       tests: test_hashes(settings)
-    })
+    }
+
+    case File.read(settings.baseline) do
+      {:ok, bytes} ->
+        case decode_baseline(bytes) do
+          {:ok, %{attributed: _}} ->
+            Attribution.cache_key(
+              Map.merge(payload, %{
+                sources: Elixir.Qlover.Coverage.Evidence.sources(settings.compile_path),
+                dependencies: Elixir.Qlover.Coverage.Evidence.dependencies(settings.compile_path)
+              })
+            )
+
+          _ ->
+            Attribution.cache_key(payload)
+        end
+
+      _ ->
+        Attribution.cache_key(payload)
+    end
   end
 
   @doc false
@@ -377,10 +472,10 @@ defmodule Mix.Tasks.Qlover do
     # sources built in different directories hash differently if they are
     # included (this is what makes cross-worktree baseline sharing
     # possible at all). Excluding them is sound: none affect execution,
-    # and line numbers are mere labels — identical Code means identical
-    # executable structure, so an unchanged suite covers it exactly as
-    # before (pure line shifts need no fresh proof). Any other volatile
-    # chunk merely costs a fresh 100% proof, never a false pass.
+    # and line numbers are mere labels for the legacy aggregate gate.
+    # Attributed snapshots retain a *separate* source-map fingerprint, so
+    # pure line shifts cannot silently relabel cached per-file hits. Other
+    # volatile chunks merely cost a fresh proof, never a false pass.
     chunks
     |> Enum.reject(fn {name, _binary} ->
       name in [~c"ExCk", ~c"Dbgi", ~c"Docs", ~c"CInf", ~c"Line"]
@@ -618,16 +713,24 @@ defmodule Mix.Tasks.Qlover do
   defp store_cached_baseline(%{cache_dir: nil}, _snapshot), do: :ok
 
   defp store_cached_baseline(settings, snapshot) do
+    payload = %{
+      beams: snapshot.beams,
+      gate: snapshot.gate,
+      tests: snapshot.tests
+    }
+
     key =
-      Attribution.cache_key(%{
-        beams: snapshot.beams,
-        gate: snapshot.gate,
-        tests: snapshot.tests
-      })
+      if evidence = Map.get(snapshot, :attributed) do
+        Attribution.cache_key(
+          Map.merge(payload, %{sources: evidence.sources, dependencies: evidence.dependencies})
+        )
+      else
+        Attribution.cache_key(payload)
+      end
 
     path = cache_baseline_path(settings.cache_dir, key)
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, :erlang.term_to_binary(snapshot, [:compressed]))
+    write_baseline_file!(path, snapshot)
     :ok
   rescue
     _error -> :ok
@@ -643,10 +746,12 @@ defmodule Mix.Tasks.Qlover do
       {:ok, entries} ->
         Enum.each(entries, fn entry ->
           if String.ends_with?(entry, ".term") do
-            File.cp(
-              Path.join(settings.refs_dir, entry),
-              Path.join(dest, entry)
-            )
+            path = Path.join(dest, entry)
+            temp = path <> ".#{System.pid()}-#{System.unique_integer([:positive])}.tmp"
+
+            if File.cp(Path.join(settings.refs_dir, entry), temp) == :ok do
+              File.rename(temp, path)
+            end
           end
         end)
 
@@ -763,6 +868,7 @@ defmodule Mix.Tasks.Qlover do
       %{vsn: @vsn, beams: beams, gate: gate, tests: tests, librefs: librefs} = baseline
       when is_map(beams) and is_binary(gate) ->
         if Attribution.valid_tests?(tests) and Attribution.valid_librefs?(librefs) and
+             Elixir.Qlover.Coverage.Evidence.valid?(Map.get(baseline, :attributed)) and
              Qlover.TestCounts.valid_inventory?(Map.get(baseline, :test_counts, %{})) do
           {:ok, baseline}
         else
@@ -850,6 +956,8 @@ defmodule Mix.Tasks.Qlover do
 
   defp write_baseline_file!(path, baseline) do
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, :erlang.term_to_binary(baseline, [:compressed]))
+    temp = path <> ".#{System.pid()}-#{System.unique_integer([:positive])}.tmp"
+    File.write!(temp, :erlang.term_to_binary(baseline, [:compressed]))
+    File.rename!(temp, path)
   end
 end

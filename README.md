@@ -102,38 +102,46 @@ fresh evidence where something changed.
 ## How it works
 
 1. **Establish a baseline.** Run the full suite and meet the 100% coverage
-   threshold. qlover remembers the compiled code, test files, and their
-   references.
+   threshold. qlover records the executable lines, each test file's runtime
+   hits, compiled-code and source-map identities, and compiler references.
 2. **Look for changes.** On the next run, compare the current project with
    that baseline. If nothing relevant changed, no tests need to run.
-3. **Run the affected tests.** Select the relevant test files and collect
-   fresh coverage. Editing or deleting a test can also require code to be
-   checked again.
-4. **Keep the coverage requirement.** Code needing a new check must reach
-   100% in the fresh run. Old coverage cannot fill gaps in changed code.
-   A test or coverage failure stops the run; a successful check advances
-   the baseline.
+3. **Replace changed contributions.** Editing a test reruns that file and
+   replaces its old line hits. Unchanged files' hits remain valid for unchanged
+   code. Deleting a test removes its hits without running unrelated tests.
+4. **Gate the union.** Every executable line still needs a current owner.
+   Changed application modules require fresh evidence; old-version hits cannot
+   fill their gaps. A test or coverage failure preserves the old baseline.
 
 Changes to configuration, dependencies, migrations, test helpers, or test
-fixtures can trigger a full run. `test_helper.exs` is a suite-wide input and
-needs no per-test attribution. Missing reference data for changed tests
-also falls back to the full suite.
+ fixtures can trigger a full run. `test_helper.exs` is a suite-wide input;
+ coverage from suite-level execution is kept separately and conservatively
+ refreshed after test edits. Legacy reference-only baselines receive one
+ attributed full refresh.
 
 Use `mix test.qlover --no-stale` to force a full suite run and refresh the
 baseline.
 
 Use `mix test.qlover --dry` to compile pending changes and print the exact test
 files qlover would select without running tests or updating the coverage
-baseline. Focused selections explain whether each file changed directly or
-references an affected module; full-suite selections print the fallback cause.
+ baseline. Focused selections distinguish edited files from conservative
+ referencer refreshes and report retained coverage rows.
 
-Requires Elixir 1.18 or newer and a **100% coverage policy**. Ordinary
+Runtime attribution currently requires OTP 29's `:sys_coverage` transform
+and Elixir 1.20.2–1.20.x. Other supported Elixir runtimes keep the legacy,
+conservative native-cover path rather than committing unverified attributed
+evidence. Requires a **100% coverage policy**. Ordinary
 `mix test` and `mix test test/my_test.exs` remain available for your usual
 test workflow.
 
-Selection uses recorded module references. Dynamic calls, protocol
-dispatch, and external inputs outside the tracked paths can escape that
-map. For changes involving those, use a full check:
+Changed application code still uses compiler references alongside recorded
+runtime owners. Long-lived shared servers and external inputs without
+request-scoped ownership cannot be reused as a particular test file's hits.
+For a new module with no known test owner, qlover can inspect its executable
+lines directly from the BEAM and report missing coverage with **zero test
+executions**. If a dynamic call or application startup actually covers it,
+`mix test.qlover --no-stale` runs the full suite to establish that evidence.
+When attribution remains ambiguous, force a full check:
 
 ```sh
 mix test --no-stale --cover

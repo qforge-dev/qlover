@@ -5,12 +5,8 @@ defmodule Qlover.Attribution do
   # over plain data (no Mix, cover, or filesystem access) so each branch
   # is cheaply unit-testable. IO lives in `Mix.Tasks.Qlover`.
   #
-  # Soundness shape: only *decreases* in coverage need fresh proof, and
-  # only changed tests can decrease anything. A changed test's old
-  # references (pinned in the baseline snapshot) conservatively bound
-  # what it could have covered, closed transitively over lib edges. New
-  # test files only add coverage, so they need no proof — but they still
-  # run, so a red new test aborts before gating.
+  # Fully attributed test-only changes replace rows without expanding compiler
+  # references. Legacy snapshots use conservative reference expansion instead.
 
   @doc false
   def record_filename(relpath) do
@@ -208,7 +204,7 @@ defmodule Qlover.Attribution do
   end
 
   @doc false
-  def cache_key(%{beams: beams, gate: gate, tests: tests}) do
+  def cache_key(%{beams: beams, gate: gate, tests: tests} = input) do
     test_shas =
       tests
       |> Enum.map(fn
@@ -218,6 +214,18 @@ defmodule Qlover.Attribution do
       |> Enum.sort()
 
     payload = %{beams: Enum.sort(beams), gate: gate, tests: test_shas}
+
+    payload =
+      if Map.has_key?(input, :sources) do
+        Map.merge(payload, %{
+          sources: Enum.sort(input.sources),
+          dependencies: Map.get(input, :dependencies),
+          backend: {:sys_coverage, System.otp_release()}
+        })
+      else
+        payload
+      end
+
     :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)
   end
 
@@ -275,48 +283,100 @@ defmodule Qlover.Attribution do
     if Enum.any?(changed, &suite_input?/1) do
       {:full, :test_fixtures}
     else
-      changed_code = Enum.filter(diff.modified ++ diff.removed, &code_file?/1)
+      cond do
+        Map.get(input, :attributed, false) and changed != [] and
+            Map.get(input, :suite_dependent, false) ->
+          {:full, :suite_evidence}
 
-      if Enum.any?(changed_code, &unknown_refs?(baseline_tests, &1)) do
-        {:full, :unattributed}
-      else
-        old_seeds = Enum.flat_map(changed_code, &baseline_tests[&1].modules)
-        affected = closure(old_seeds, lib_edges)
-        beam_mods = Enum.map(beam_changed, &beam_module_string/1)
-        deleted_mods = Map.get(input, :beam_deleted, [])
-        fresh_closure = fresh_closure(beam_mods, lib_edges, fresh_lib_edges)
-        prove_mods = Enum.uniq(beam_mods ++ affected ++ fresh_closure)
+        Map.get(input, :attributed, false) and
+            not Map.get(input, :dependency_unchanged, false) ->
+          {:full, :dependencies}
 
-        prove =
-          prove_mods
-          |> Enum.map(&beam_filename/1)
-          |> Enum.filter(&Map.has_key?(current_beams, &1))
-          |> Enum.sort()
+        Map.get(input, :attributed, false) and Map.get(input, :source_map_drift, false) ->
+          {:full, :source_map}
 
-        # Expansion matches only modules that can actually be proven
-        # (have current beams) plus deleted ones: tracer noise such as
-        # ExUnit.Case or Kernel appears in every file's references and
-        # must never widen the run, while a surviving test that still
-        # references a deleted module must run to surface the breakage.
-        expand_mods =
-          ((prove |> Enum.map(&beam_module_string/1)) ++ deleted_mods) |> Enum.uniq()
+        Map.get(input, :attributed, false) and beam_changed == [] and
+            Map.get(input, :beam_deleted, []) == [] ->
+          run =
+            (diff.added ++ diff.modified)
+            |> Enum.filter(&code_file?/1)
+            |> runnable_files(compiled_dirs, project_root)
+            |> Enum.sort()
 
-        test_changed = Enum.any?(diff.added ++ diff.modified, &code_file?/1)
+          {:incremental, %{prove: [], run: run, test_changed: changed != [], attributed: true}}
 
-        # The run set is the complete execution list: changed files plus
-        # every runnable referencer. There is no stale manifest involved —
-        # test.qlover executes exactly these files with --no-stale — so
-        # pure lib changes list their referencers here too.
-        run =
-          (Enum.filter(diff.added ++ diff.modified, &code_file?/1) ++
-             referencing_files(expand_mods, union_refs))
-          |> Enum.uniq()
-          |> Enum.sort()
-          |> Enum.filter(&Map.has_key?(current_tests, &1))
-          |> runnable_files(compiled_dirs, project_root)
-
-        {:incremental, %{prove: prove, run: run, test_changed: test_changed}}
+        true ->
+          reference_plan(
+            input,
+            diff,
+            current_beams,
+            beam_changed,
+            baseline_tests,
+            current_tests,
+            union_refs,
+            lib_edges,
+            fresh_lib_edges,
+            compiled_dirs,
+            project_root
+          )
       end
+    end
+  end
+
+  defp reference_plan(
+         input,
+         diff,
+         current_beams,
+         beam_changed,
+         baseline_tests,
+         current_tests,
+         union_refs,
+         lib_edges,
+         fresh_lib_edges,
+         compiled_dirs,
+         project_root
+       ) do
+    changed_code = Enum.filter(diff.modified ++ diff.removed, &code_file?/1)
+
+    if Enum.any?(changed_code, &unknown_refs?(baseline_tests, &1)) do
+      {:full, :unattributed}
+    else
+      old_seeds = Enum.flat_map(changed_code, &baseline_tests[&1].modules)
+      affected = closure(old_seeds, lib_edges)
+      beam_mods = Enum.map(beam_changed, &beam_module_string/1)
+      deleted_mods = Map.get(input, :beam_deleted, [])
+      fresh_closure = fresh_closure(beam_mods, lib_edges, fresh_lib_edges)
+      prove_mods = Enum.uniq(beam_mods ++ affected ++ fresh_closure)
+
+      prove =
+        prove_mods
+        |> Enum.map(&beam_filename/1)
+        |> Enum.filter(&Map.has_key?(current_beams, &1))
+        |> Enum.sort()
+
+      # Expansion matches only modules that can actually be proven
+      # (have current beams) plus deleted ones: tracer noise such as
+      # ExUnit.Case or Kernel appears in every file's references and
+      # must never widen the run, while a surviving test that still
+      # references a deleted module must run to surface the breakage.
+      expand_mods =
+        ((prove |> Enum.map(&beam_module_string/1)) ++ deleted_mods) |> Enum.uniq()
+
+      test_changed = Enum.any?(diff.added ++ diff.modified, &code_file?/1)
+
+      # The run set is the complete execution list: changed files plus
+      # every runnable referencer. There is no stale manifest involved —
+      # test.qlover executes exactly these files with --no-stale — so
+      # pure lib changes list their referencers here too.
+      run =
+        (Enum.filter(diff.added ++ diff.modified, &code_file?/1) ++
+           referencing_files(expand_mods, union_refs) ++ Map.get(input, :runtime_owners, []))
+        |> Enum.uniq()
+        |> Enum.sort()
+        |> Enum.filter(&Map.has_key?(current_tests, &1))
+        |> runnable_files(compiled_dirs, project_root)
+
+      {:incremental, %{prove: prove, run: run, test_changed: test_changed}}
     end
   end
 

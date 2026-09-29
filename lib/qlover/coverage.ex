@@ -3,15 +3,138 @@ defmodule Qlover.Coverage do
 
   # Keep Mix's instrumentation and HTML reports. For qlover full runs only,
   # replace its rounded summary with a floored display and an exact gate.
+  def attributed_supported?, do: attributed_supported?(System.otp_release(), System.version())
+
+  def attributed_supported?("29", elixir) when is_binary(elixir) do
+    Version.match?(elixir, ">= 1.20.2 and < 1.21.0")
+  end
+
+  def attributed_supported?(_otp, _elixir), do: false
+
   def prepare(args) do
     opts = Mix.Project.config()[:test_coverage] || []
 
+    if "--cover" in args and is_binary(System.get_env("QLOVER_ATTR_REPORT")) and
+         attributed_supported?() do
+      Mix.ProjectStack.merge_config(test_coverage: Keyword.put(opts, :tool, __MODULE__))
+      nil
+    else
+      prepare_native(args, opts)
+    end
+  end
+
+  defp prepare_native(args, opts) do
     if "--cover" in args and not exporting?(args, opts) and
          Keyword.get(opts, :summary, true) != false and
          Keyword.get(opts, :tool, Mix.Tasks.Test.Coverage) == Mix.Tasks.Test.Coverage do
       Mix.ProjectStack.merge_config(test_coverage: Keyword.put(opts, :summary, false))
       opts
     end
+  end
+
+  # Mix coverage tool contract. The child writes only a run report; the parent
+  # commits it after the entire test command has exited successfully.
+  def start(compile_path, opts) do
+    Mix.shell().info("Instrumenting attributed coverage ...")
+    Code.ensure_loaded!(ExUnit.Runner)
+    beams = Mix.Tasks.Qlover.beam_hashes(compile_path)
+    instrument_started = System.monotonic_time(:microsecond)
+
+    inventory =
+      Qlover.Coverage.Instrumenter.instrument!(compile_path, opts[:ignore_modules] || [])
+
+    instrument_us = System.monotonic_time(:microsecond) - instrument_started
+    runtime = Qlover.Coverage.Runtime.start!()
+
+    fn ->
+      for {name, _} <- inventory do
+        unless :code.which(String.to_atom(name)) == ~c"qlover_instrumented" do
+          raise "coverage target #{name} was reloaded during the test run"
+        end
+      end
+
+      collect_started = System.monotonic_time(:microsecond)
+      {hits, suite, stats} = Qlover.Coverage.Runtime.finish!(runtime, inventory)
+
+      report = %{
+        vsn: 2,
+        otp: System.otp_release(),
+        elixir: System.version(),
+        backend: :sys_coverage,
+        run: :crypto.strong_rand_bytes(16),
+        complete: true,
+        beams: beams,
+        inventory: inventory,
+        hits: hits,
+        suite: suite,
+        metrics:
+          Map.merge(stats, %{
+            instrument_us: instrument_us,
+            collect_us: System.monotonic_time(:microsecond) - collect_started
+          })
+      }
+
+      path = System.fetch_env!("QLOVER_ATTR_REPORT")
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, :erlang.term_to_binary(report, [:compressed]))
+
+      unless opts[:export] do
+        rows =
+          for {name, %{lines: lines}} <- inventory do
+            hit =
+              [suite | Map.values(hits)]
+              |> Enum.flat_map(&Map.get(&1, name, []))
+              |> MapSet.new()
+
+            {String.to_atom(name), {Enum.count(lines, &MapSet.member?(hit, &1)), length(lines)}}
+          end
+
+        results =
+          for {module, {covered, total}} <- rows,
+              total > 0,
+              line <- 1..total,
+              do: {{module, line}, {if(line <= covered, do: 1, else: 0), 1}}
+
+        summary = Keyword.get(opts, :summary, true)
+
+        if summary != false do
+          threshold = if is_list(summary), do: Keyword.get(summary, :threshold, 90), else: 90
+          summarize(results, Enum.map(rows, &elem(&1, 0)), threshold)
+        end
+      end
+    end
+  end
+
+  def read_report(path) do
+    # `:safe` rejects atoms absent from this VM. The collector runs in the
+    # child, so load its known metric keys before decoding its report.
+    Code.ensure_loaded!(Qlover.Coverage.Runtime)
+
+    with {:ok, bytes} <- File.read(path),
+         %{
+           vsn: 2,
+           otp: otp,
+           elixir: elixir,
+           backend: :sys_coverage,
+           complete: true,
+           beams: beams,
+           inventory: inventory,
+           hits: hits,
+           suite: suite,
+           run: run,
+           metrics: metrics
+         } = report <-
+           :erlang.binary_to_term(bytes, [:safe]),
+         true <-
+           otp == System.otp_release() and elixir == System.version() and is_map(beams) and
+             is_map(inventory) and is_map(hits) and is_map(suite) and is_map(metrics) and
+             is_binary(run) and byte_size(run) == 16 do
+      report
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   def finish(nil), do: :ok

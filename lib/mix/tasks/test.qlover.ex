@@ -2,32 +2,26 @@ defmodule Mix.Tasks.Test.Qlover do
   @shortdoc "Run tests with incremental coverage gating"
 
   @moduledoc """
-  Runs the test suite with incremental line-coverage gating in one command:
+  Runs the test suite with runtime-attributed line coverage in one command:
 
       mix test.qlover
 
-  Plain `mix test` is left untouched, so single-file runs and ad-hoc flags
-  keep working exactly as before. `mix test.qlover` decides by itself:
-
-    * Baseline exists and non-test gate inputs (`priv/repo/`, `config/`,
-      `mix.exs`, `mix.lock`) match: runs exactly the affected test files
-      with coverage, then gates (`mix test --no-stale <files> --cover
-      --export-coverage .qlover_fresh` + `mix qlover`). Test-only edits
-      stay incremental through per-test attribution.
-    * Otherwise — first run, missing/invalid baseline, or changed
-      non-test inputs — runs the full suite with coverage and snapshots a
-      new baseline (`mix test --no-stale --cover` + `mix qlover
-      --write-baseline`). An info message says which path was taken.
+  Plain `mix test` is unchanged. A successful full run records executable
+  lines and their runtime test-file owners. A test-only edit reruns the edited
+  file, replaces its old hits, and combines them with other files' unchanged
+  hits. Deleting a file gates directly from surviving evidence. Changed code,
+  helpers, dependencies, and incompatible or missing evidence use a
+  conservative refresh. Failed tests or coverage never advance a baseline.
 
   There is no stale manifest involved: the file list comes from qlover's
-  own content-keyed reference graph, so selection is deterministic across
-  worktrees and machines, and a hostile host `test` alias injecting
+  own evidence and reference graph, so selection is deterministic across
+  worktrees, and a host `test` alias injecting
   `--stale` cannot shrink it (`--no-stale` is passed first, which wins the
   duplicate-flag resolution).
 
-  Extra arguments are appended to the selection (`mix test.qlover --seed
-  0`); extra *file* arguments widen it, which stays sound because all
-  coverage still comes from one code version. `--no-stale` forces a full
+  Extra arguments are appended to focused selection (`mix test.qlover --seed
+  0`). Filtering flags cannot produce reusable coverage, and explicit files
+  cannot restrict a full baseline. `--no-stale` forces a full
   suite run and refreshes the baseline. `--dry` compiles pending changes and
   prints the files qlover would select, with their selection reasons, without
   running tests or updating the coverage baseline. The flags `--stale`,
@@ -38,18 +32,14 @@ defmodule Mix.Tasks.Test.Qlover do
   Path overrides (mirroring `mix qlover`):
 
     * `--baseline PATH` - baseline file (default: `cover/.qlover_baseline`)
-    * `--export PATH` - scratch export (default:
-      `cover/.qlover_fresh.coverdata`); custom paths must live under the
-      `test_coverage` output dir with a `.coverdata` suffix.
-    * `--expansion-export PATH` - second scratch export accepted by the
-      gate (default: `cover/.qlover_expansion.coverdata`).
+    * `--export PATH` and `--expansion-export PATH` - legacy cover scratch
+      export locations; attributed runs use a private, versioned report
+      instead of `.coverdata`, which has no file ownership.
 
   Test failures abort before gating and never update the baseline. Scratch
   exports are deleted after gating (and any leftovers removed before each
   run), so a later `mix test.coverage` never unions a stale partial into a
-  full report. When test files change but reference data is available, only
-  the affected tests rerun in the focused run instead of the full
-  suite (see `Mix.Tasks.Qlover`).
+  full report.
 
   Each invocation reports `qlover: ran X tests; didn't run Y tests.` Counts
   come from ExUnit (including generated tests and doctests); unchanged files
@@ -107,6 +97,10 @@ defmodule Mix.Tasks.Test.Qlover do
     no_stale: "--no-stale forces a full run",
     test_counts: "the baseline has no test counts",
     gate_inputs: "gate inputs changed",
+    dependencies: "compiled dependencies changed",
+    suite_evidence: "suite-level coverage needs a full refresh after test changes",
+    source_map: "application source locations changed",
+    unattributed_baseline: "the baseline has no runtime-attributed evidence",
     test_fixtures: "test fixtures or helpers changed",
     unattributed: "changed tests have no reference data"
   }
@@ -129,7 +123,12 @@ defmodule Mix.Tasks.Test.Qlover do
 
     Mix.Task.run("compile")
 
-    selection = selection_plan(settings, flags)
+    selection =
+      selection_plan(
+        settings,
+        flags,
+        runner == (&default_runner/1) and Elixir.Qlover.Coverage.attributed_supported?()
+      )
 
     if Keyword.get(flags, :dry, false) do
       print_dry_plan(selection, settings, test_args)
@@ -158,33 +157,43 @@ defmodule Mix.Tasks.Test.Qlover do
     path =
       Path.join(dir, "qlover-counts-#{System.pid()}-#{System.unique_integer([:positive])}.term")
 
+    coverage_path = path <> ".coverage"
+
     File.rm(path)
 
     try do
       code =
-        default_runner([
-          "run",
-          "--no-start",
-          "--no-compile",
-          "-e",
-          "Qlover.TestCounts.install(#{inspect(path)}); " <>
-            "coverage = Qlover.Coverage.prepare(System.argv()); " <>
-            "Mix.Task.run(\"test\", System.argv()); Qlover.Coverage.finish(coverage)",
-          "--" | args
-        ])
+        run_child(
+          [
+            "run",
+            "--no-start",
+            "--no-compile",
+            "-e",
+            "Qlover.TestCounts.install(#{inspect(path)}); " <>
+              "coverage = Qlover.Coverage.prepare(System.argv()); " <>
+              "Mix.Task.run(\"test\", System.argv()); Qlover.Coverage.finish(coverage)",
+            "--" | args
+          ],
+          coverage_path
+        )
 
-      {code, TestCounts.read_report(path)}
+      report = TestCounts.read_report(path)
+      coverage = Elixir.Qlover.Coverage.read_report(coverage_path)
+      {code, if(report, do: Map.put(report, :coverage, coverage), else: nil)}
     after
       File.rm(path)
+      File.rm(coverage_path)
     end
   end
 
-  def default_runner(argv) do
+  def default_runner(argv), do: run_child(argv, nil)
+
+  defp run_child(argv, coverage_path) do
     {_output, code} =
       System.cmd("mix", argv,
         into: IO.stream(:stdio, :line),
         stderr_to_stdout: true,
-        env: [{"MIX_ENV", to_string(Mix.env())}]
+        env: [{"MIX_ENV", to_string(Mix.env())}, {"QLOVER_ATTR_REPORT", coverage_path}]
       )
 
     code
@@ -236,7 +245,7 @@ defmodule Mix.Tasks.Test.Qlover do
     Path.basename(path, ".coverdata")
   end
 
-  defp selection_plan(settings, flags) do
+  defp selection_plan(settings, flags, attributed_runner?) do
     persist? = not Keyword.get(flags, :dry, false)
 
     case Qlover.load_baseline(settings, persist: persist?) do
@@ -244,17 +253,20 @@ defmodule Mix.Tasks.Test.Qlover do
         {:full, :baseline, %{}}
 
       {:ok, baseline} ->
-        select_with_baseline(settings, flags, baseline)
+        select_with_baseline(settings, flags, baseline, attributed_runner?)
     end
   end
 
-  defp select_with_baseline(settings, flags, baseline) do
+  defp select_with_baseline(settings, flags, baseline, attributed_runner?) do
     cond do
       Keyword.get(flags, :no_stale, false) ->
         {:full, :no_stale, baseline}
 
       not Map.has_key?(baseline, :test_counts) ->
         {:full, :test_counts, baseline}
+
+      attributed_runner? and not Map.has_key?(baseline, :attributed) ->
+        {:full, :unattributed_baseline, baseline}
 
       baseline.gate != Qlover.gate_hash(settings.gate_paths, settings.project_root) ->
         {:full, :gate_inputs, baseline}
@@ -284,17 +296,36 @@ defmodule Mix.Tasks.Test.Qlover do
   end
 
   defp run_full!(settings, runner, test_args, baseline) do
+    if runner == (&default_runner/1) and Elixir.Qlover.Coverage.attributed_supported?(),
+      do: require_complete_selection!(test_args, true)
+
     result = runner.(["test", "--no-stale", "--cover"] ++ test_args)
-    finish_run!(settings, baseline, result, &Qlover.write_baseline!/1)
+
+    finish_run!(
+      settings,
+      baseline,
+      result,
+      &Qlover.write_baseline!/1,
+      runner == (&default_runner/1) and Elixir.Qlover.Coverage.attributed_supported?()
+    )
   end
 
   defp run_focused!(settings, runner, test_args, prove, run, baseline) do
+    if run != [] and runner == (&default_runner/1) and
+         Elixir.Qlover.Coverage.attributed_supported?(),
+       do: require_complete_selection!(test_args, false)
+
     cond do
       run != [] ->
         Mix.shell().info("qlover: running #{length(run)} focused test file(s) with coverage...")
 
       prove == [] ->
         Mix.shell().info("qlover: nothing to re-run; gating on the baseline...")
+
+      Map.has_key?(baseline, :attributed) ->
+        Mix.shell().info(
+          "qlover: no tests reference #{length(prove)} changed module(s); gating executable lines without running tests..."
+        )
 
       true ->
         Mix.shell().info(
@@ -327,10 +358,29 @@ defmodule Mix.Tasks.Test.Qlover do
       end
 
     try do
-      finish_run!(settings, baseline, result, &Qlover.gate!/1)
+      finish_run!(
+        settings,
+        baseline,
+        result,
+        &Qlover.gate!/1,
+        run != [] and runner == (&default_runner/1) and
+          Elixir.Qlover.Coverage.attributed_supported?()
+      )
     after
       _ = File.rm(settings.export_path)
       _ = File.rm(settings.expansion_export_path)
+    end
+  end
+
+  defp require_complete_selection!(args, full?) do
+    if Enum.any?(args, fn arg ->
+         (full? and String.ends_with?(arg, ".exs")) or
+           Enum.any?(
+             ["--only", "--exclude", "--include", "--max-failures"],
+             &String.starts_with?(arg, &1)
+           )
+       end) do
+      Mix.raise("filtered test runs cannot establish reusable attributed coverage")
     end
   end
 
@@ -352,6 +402,22 @@ defmodule Mix.Tasks.Test.Qlover do
     "qlover: recording test counts, running full suite..."
   end
 
+  defp full_run_message(:unattributed_baseline, _settings) do
+    "qlover: legacy baseline needs runtime attribution, running full suite..."
+  end
+
+  defp full_run_message(:source_map, _settings) do
+    "qlover: source locations changed, running full suite..."
+  end
+
+  defp full_run_message(:dependencies, _settings) do
+    "qlover: compiled dependencies changed, running full suite..."
+  end
+
+  defp full_run_message(:suite_evidence, _settings) do
+    "qlover: suite-level coverage needs refresh, running full suite..."
+  end
+
   defp full_run_message(:gate_inputs, settings), do: first_run_message(settings)
   defp full_run_message(reason, _settings), do: attribution_fallback_message(reason)
 
@@ -364,12 +430,29 @@ defmodule Mix.Tasks.Test.Qlover do
     :ok
   end
 
-  defp print_dry_plan({:incremental, plan, _baseline}, _settings, test_args) do
+  defp print_dry_plan({:incremental, plan, baseline}, settings, test_args) do
     Mix.shell().info("qlover: dry run would run #{length(plan.run)} focused test file(s):")
 
     Enum.each(plan.run, fn file ->
       Mix.shell().info("  #{file} (#{format_reason(plan.reasons[file])})")
     end)
+
+    if evidence = Map.get(baseline, :attributed) do
+      if plan.run == [] and plan.prove != [] do
+        Mix.shell().info(
+          "qlover: would inspect #{length(plan.prove)} changed module(s) for uncovered lines."
+        )
+      end
+
+      hashes = Qlover.test_hashes(settings)
+
+      retained =
+        Enum.count(evidence.rows, fn {file, row} ->
+          hashes[file] == row.sha and file not in plan.run
+        end)
+
+      Mix.shell().info("qlover: retaining #{retained} unchanged file coverage row(s).")
+    end
 
     print_test_args(test_args)
     :ok
@@ -396,14 +479,27 @@ defmodule Mix.Tasks.Test.Qlover do
     prefix <> "references affected modules: " <> names
   end
 
-  defp finish_run!(settings, baseline, result, next) do
+  defp finish_run!(settings, baseline, result, next, require_coverage?) do
     {code, report} = if is_tuple(result), do: result, else: {result, nil}
     counts = TestCounts.inventory(settings, baseline, report)
 
     try do
       case code do
-        0 -> next.(%{settings | test_counts: counts})
-        code -> Mix.raise("qlover test run failed (exit #{code}); not gating")
+        0 ->
+          coverage = if report, do: report[:coverage]
+
+          if require_coverage? and coverage == nil do
+            Mix.raise("attributed coverage report missing or corrupt; baseline not updated")
+          end
+
+          if require_coverage? and report.skipped > 0 do
+            Mix.raise("skipped/excluded tests cannot establish reusable attributed coverage")
+          end
+
+          next.(%{settings | test_counts: counts, coverage: coverage})
+
+        code ->
+          Mix.raise("qlover test run failed (exit #{code}); not gating")
       end
     after
       Mix.shell().info(TestCounts.summary(counts, report))

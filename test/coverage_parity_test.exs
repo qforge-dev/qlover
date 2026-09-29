@@ -1,0 +1,137 @@
+defmodule Qlover.CoverageParityTest do
+  use ExUnit.Case, async: false
+
+  @moduletag :tmp_dir
+
+  test "attributed backend is selected only for its tested runtime family" do
+    assert Qlover.Coverage.attributed_supported?("29", "1.20.2")
+    refute Qlover.Coverage.attributed_supported?("28", "1.20.2")
+    refute Qlover.Coverage.attributed_supported?("29", "1.18.4")
+    refute Qlover.Coverage.attributed_supported?("29", "1.21.0")
+  end
+
+  test "source maps follow the current worktree rather than a copied BEAM's source path" do
+    expected = Path.expand("lib/qlover.ex")
+
+    assert Qlover.Coverage.Evidence.source_path("/some-other-worktree/lib/qlover.ex") ==
+             expected
+  end
+
+  test "missing, corrupt and incompatible attributed reports are not reusable", %{tmp_dir: dir} do
+    path = Path.join(dir, "report")
+    assert Qlover.Coverage.read_report(path) == nil
+    File.write!(path, "not an Erlang term")
+    assert Qlover.Coverage.read_report(path) == nil
+
+    File.write!(
+      path,
+      :erlang.term_to_binary(%{
+        vsn: 2,
+        otp: "old",
+        elixir: System.version(),
+        backend: :sys_coverage,
+        complete: true,
+        beams: %{},
+        inventory: %{},
+        hits: %{}
+      })
+    )
+
+    assert Qlover.Coverage.read_report(path) == nil
+  end
+
+  test "OTP executable lines and runtime hits agree on branches, guards, comprehensions and exceptions",
+       %{
+         tmp_dir: dir
+       } do
+    source = Path.join(dir, "parity.ex")
+    beams = Path.join(dir, "ebin")
+    File.mkdir_p!(beams)
+
+    File.write!(source, """
+    defmodule QloverParity do
+      def branch(x) do
+        case x do
+          :left -> :one
+          :right -> :two
+        end
+      end
+
+      def guarded(x) when is_integer(x), do: x + 1
+      def guarded(_), do: :other
+
+      def values(xs) do
+        for x <- xs, rem(x, 2) == 0, do: x * 2
+      end
+
+      def rescued(x) do
+        try do
+          div(10, x)
+        rescue
+          ArithmeticError -> :bad
+        end
+      end
+    end
+    """)
+
+    native = run_backend!(source, beams, :native)
+    attributed = run_backend!(source, beams, :attributed)
+    assert attributed == native
+  end
+
+  defp run_backend!(source, beams, backend) do
+    script = """
+    [source, beams, backend, qlover] = System.argv()
+    Code.prepend_path(qlover)
+    Code.compiler_options(debug_info: true)
+    [{module, binary}] = Code.compile_file(source)
+    beam = Path.join(beams, Atom.to_string(module) <> ".beam")
+    File.write!(beam, binary)
+
+    inventory =
+      if backend == "native" do
+        {:ok, _} = :cover.start()
+        {:ok, ^module} = :cover.compile_beam(String.to_charlist(beam))
+        nil
+      else
+        Code.ensure_loaded!(ExUnit.Runner)
+        offline = Qlover.Coverage.Instrumenter.inventory!(beams, [Path.basename(beam)], [])
+        inventory = Qlover.Coverage.Instrumenter.instrument!(beams, [])
+        if offline != inventory, do: raise("offline inventory differs from runtime probes")
+        Qlover.Coverage.Runtime.start!()
+        inventory
+      end
+
+    module.branch(:left)
+    module.guarded(:x)
+    module.values([1, 2, 3])
+    module.rescued(0)
+
+    result =
+      if backend == "native" do
+        {:ok, entries} = :cover.analyse(module, :coverage, :line)
+        all = for {{^module, line}, _} <- entries, line > 0, do: line
+        hits = for {{^module, line}, {count, _}} <- entries, line > 0, count > 0, do: line
+        {Enum.sort(Enum.uniq(all)), Enum.sort(Enum.uniq(hits))}
+      else
+        %{probes: probes, lines: all} = inventory[Atom.to_string(module)]
+        hits = for {{pid, ^module, id}} <- :ets.tab2list(:qlover_attributed_hits),
+                   pid == self(),
+                   line = probes[id], line > 0, do: line
+        {all, Enum.sort(Enum.uniq(hits))}
+      end
+
+    IO.puts("PARITY:" <> Base.encode64(:erlang.term_to_binary(result)))
+    """
+
+    {output, 0} =
+      System.cmd(
+        "elixir",
+        ["-e", script, "--", source, beams, to_string(backend), Mix.Project.compile_path()],
+        stderr_to_stdout: true
+      )
+
+    [_, encoded] = Regex.run(~r/PARITY:([A-Za-z0-9+\/=]+)/, output) || flunk(output)
+    encoded |> Base.decode64!() |> :erlang.binary_to_term([:safe])
+  end
+end
