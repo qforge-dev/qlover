@@ -1,4 +1,4 @@
-name: Releases
+name: Native releases
 
 on:
   push:
@@ -9,34 +9,81 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name == 'release' && github.event.release.tag_name || github.event_name == 'pull_request' && github.ref || 'dev' }}
+  group: native-release-${{ github.event_name == 'release' && github.event.release.tag_name || github.event_name == 'pull_request' && github.ref || 'dev' }}
   cancel-in-progress: false
 
 env:
+  CARGO_TERM_COLOR: always
   QLOVER_CACHE_DIR: ""
   QLOVER_RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || 'dev' }}
   QLOVER_RELEASE_ID: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
 
 jobs:
   quality:
+    if: github.event_name != 'release'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
       - uses: erlef/setup-beam@v1
         with:
           otp-version: "29.0.3"
           elixir-version: "1.20.2"
-      - name: Install dependencies
-        run: |
-          mix local.hex --force
-          mix deps.get --check-locked
+      - run: mix local.hex --force
+      - run: mix deps.get --check-locked
       - run: bash scripts/check
 
-  build:
-    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+  native:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux
+            rust_targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+            targets: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+            cross: true
+          - os: macos-15
+            name: macos
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+            cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+          targets: ${{ matrix.rust_targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          key: ${{ matrix.name }}
+      - uses: taiki-e/install-action@cross
+        if: matrix.cross
+      - run: bash scripts/build-release-targets dist $TARGETS
+        env:
+          TARGETS: ${{ matrix.targets }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-native-${{ matrix.name }}
+          path: dist/qlover-*
+          if-no-files-found: error
+
+  package:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: quality
     runs-on: ubuntu-22.04
     steps:
@@ -45,13 +92,8 @@ jobs:
         with:
           otp-version: "29.0.3"
           elixir-version: "1.20.2"
-      - name: Install dependencies
-        run: |
-          mix local.hex --force
-          mix deps.get --check-locked
-      - name: Verify release version
-        if: github.event_name == 'release'
-        run: bash scripts/check-release-version "$QLOVER_RELEASE_TAG"
+      - run: mix local.hex --force
+      - run: mix deps.get --check-locked
       - name: Build Mix package and documentation
         run: |
           mix hex.build
@@ -60,16 +102,46 @@ jobs:
           version=$(tr -d '[:space:]' < VERSION)
           cp "qlover-$version.tar" "dist/qlover-$QLOVER_RELEASE_ID.tar"
           tar -czf "dist/qlover-$QLOVER_RELEASE_ID-docs.tar.gz" -C doc .
-          (cd dist && sha256sum qlover-* > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
-          name: package
-          path: dist/*
+          name: release-package
+          path: dist/qlover-*
+          if-no-files-found: error
+
+  promote:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0.3"
+          elixir-version: "1.20.2"
+      - run: mix local.hex --force
+      - run: mix deps.get --check-locked
+      - run: bash scripts/check-release-version "$QLOVER_RELEASE_TAG"
+      - name: Promote the tested push artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QLOVER_SOURCE_ID: ${{ github.sha }}
+        run: |
+          run_id=$(gh run list --workflow release.yml --event push --commit "$GITHUB_SHA" \
+            --limit 1 --json databaseId --jq '.[0].databaseId')
+          test -n "$run_id" || { echo "No push build found for $GITHUB_SHA" >&2; exit 1; }
+          gh run watch "$run_id" --exit-status --compact
+          gh run download "$run_id" --pattern 'release-*' --dir promoted-input
+          bash scripts/promote-release-assets promoted-input dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-promoted
+          path: dist/qlover-*
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
-    needs: build
+    if: >-
+      always() && github.event_name != 'pull_request' &&
+      ((needs.native.result == 'success' && needs.package.result == 'success') || needs.promote.result == 'success')
+    needs: [native, package, promote]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -77,10 +149,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: package
+          pattern: release-*
           path: dist
-      - name: Verify checksums
-        run: (cd dist && sha256sum --check SHA256SUMS)
+          merge-multiple: true
+      - name: Generate checksums for the four binaries, package and docs
+        run: |
+          test "$(find dist -maxdepth 1 -type f -name 'qlover-*' | wc -l)" -eq 6
+          (cd dist && sha256sum qlover-* > SHA256SUMS)
       - name: Replace rolling dev release
         if: github.event_name != 'release'
         env:
@@ -88,12 +163,10 @@ jobs:
         run: |
           gh release delete dev --cleanup-tag --yes || true
           gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" || true
-          gh release create dev dist/* \
-            --target "$GITHUB_SHA" \
-            --prerelease \
+          gh release create dev dist/* --target "$GITHUB_SHA" --prerelease \
             --title "qlover dev (${GITHUB_SHA::7})" \
-            --notes "Rolling development package for commit $GITHUB_SHA. Assets are replaced by every successful push to main."
-      - name: Upload versioned release assets
+            --notes "Commit-addressed native binaries, package and docs for $GITHUB_SHA."
+      - name: Upload stable release assets
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}

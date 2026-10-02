@@ -4,8 +4,11 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 export QLOVER_CACHE_DIR=""
+cargo fmt --manifest-path native/Cargo.toml --check
+cargo clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings
+cargo test --manifest-path native/Cargo.toml --locked
 mix format --check-formatted
 MIX_ENV=test mix compile --warnings-as-errors
 mix test --warnings-as-errors --cover
-bash -n release scripts/check scripts/check-release-version
+bash -n release scripts/check scripts/check-release-version scripts/build-release-targets scripts/promote-release-assets
 bash scripts/check-release-version "v$(tr -d '[:space:]' < VERSION)"

@@ -92,9 +92,16 @@ awk -v version="$next" -v date="$(date +%F)" '
 ' CHANGELOG.md > "$tmp/CHANGELOG.md"
 cat "$tmp/CHANGELOG.md" > CHANGELOG.md
 printf '%s\n' "$next" > VERSION
+awk -v version="$next" '
+  /^\[package\]$/ { package = 1 }
+  package && /^version = / { $0 = "version = \"" version "\""; package = 0 }
+  { print }
+' native/Cargo.toml > "$tmp/Cargo.toml"
+cat "$tmp/Cargo.toml" > native/Cargo.toml
+cargo update --offline --workspace --manifest-path native/Cargo.toml
 bash scripts/check-release-version "$tag"
 
-git add -- VERSION CHANGELOG.md
+git add -- VERSION CHANGELOG.md native/Cargo.toml native/Cargo.lock
 git commit -m "Release $tag"
 git tag -a "$tag" -m "qlover $tag"
 git push --atomic origin HEAD:refs/heads/main "refs/tags/$tag"

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# -ge 2 ]] || { echo 'Usage: scripts/build-release-targets OUTPUT_DIR TARGET...' >&2; exit 64; }
+root=$(cd "$(dirname "$0")/.." && pwd)
+out=$1
+shift
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+host=$(rustc -vV | awk '/^host:/ { print $2 }')
+release_id=${QLOVER_RELEASE_ID:?QLOVER_RELEASE_ID is required}
+for target in "$@"; do
+  if [[ "$target" == "$host" || ( "$host" == *apple-darwin && "$target" == *apple-darwin ) ]]; then
+    cargo build --release --locked --manifest-path "$root/native/Cargo.toml" --target "$target"
+  else
+    cross build --release --locked --manifest-path "$root/native/Cargo.toml" --target "$target"
+  fi
+  cp "$root/native/target/$target/release/qlover" "$out/qlover-$release_id-$target"
+done

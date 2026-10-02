@@ -35,7 +35,7 @@ defmodule Qlover.MixProject do
   end
 
   def application do
-    [extra_applications: [:crypto, :tools]]
+    [extra_applications: [:crypto, :tools, :inets, :ssl]]
   end
 
   def cli do

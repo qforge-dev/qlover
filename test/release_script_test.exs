@@ -130,6 +130,21 @@ defmodule Qlover.ReleaseScriptTest do
     )
 
     File.write!(Path.join(work, "VERSION"), "1.2.3\n")
+    File.mkdir_p!(Path.join(work, "native/src"))
+    File.write!(Path.join(work, "native/src/main.rs"), "fn main() {}\n")
+
+    File.write!(
+      Path.join(work, "native/Cargo.toml"),
+      "[package]\nname = \"qlover\"\nversion = \"1.2.3\"\nedition = \"2021\"\n"
+    )
+
+    assert {_, 0} =
+             System.cmd(
+               "cargo",
+               ["generate-lockfile", "--offline", "--manifest-path", "native/Cargo.toml"],
+               cd: work,
+               stderr_to_stdout: true
+             )
 
     File.write!(Path.join(work, "CHANGELOG.md"), """
     # Changelog

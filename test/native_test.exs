@@ -54,7 +54,7 @@ defmodule Qlover.NativeTest do
 
   test "the installer produces an executable client", %{tmp_dir: dir} do
     path = Path.join(dir, "bin/qlover")
-    Mix.Tasks.Qlover.Install.run(["--path", path])
+    Mix.Tasks.Qlover.Install.run(["--source", "--force", "--path", path])
     {help, 0} = System.cmd(path, ["--help"])
     assert help =~ "Persistent native coordinator"
   end

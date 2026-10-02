@@ -6,6 +6,11 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 tag=$1
 version=$(tr -d '[:space:]' < VERSION)
+cargo_version=$(awk '/^\[package\]$/ { package = 1; next } /^\[/ { package = 0 } package && /^version = / { gsub(/["[:space:]]/, "", $3); print $3; exit }' native/Cargo.toml)
+[[ "$cargo_version" == "$version" ]] || {
+  echo "Cargo version $cargo_version does not match VERSION ($version)" >&2
+  exit 1
+}
 [[ "$tag" == "v$version" ]] || {
   echo "Release tag $tag does not match VERSION ($version)" >&2
   exit 1

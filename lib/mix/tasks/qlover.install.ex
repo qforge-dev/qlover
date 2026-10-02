@@ -1,26 +1,18 @@
 defmodule Mix.Tasks.Qlover.Install do
   use Mix.Task
-  @shortdoc "Build and install the native qlover daemon/client"
-  @moduledoc "Builds the locked Rust client. Use --path to override ~/.local/bin/qlover."
+  @shortdoc "Install the native qlover daemon/client"
+  @moduledoc "Installs a checksum-verified native release. Use --source to build locally and --path to override ~/.local/bin/qlover."
 
   @impl true
   def run(args) do
-    {opts, []} = OptionParser.parse!(args, strict: [path: :string])
-    source = Mix.Project.deps_paths()[:qlover] || File.cwd!()
-    native = Path.join(source, "native")
+    {opts, []} =
+      OptionParser.parse!(args, strict: [path: :string, source: :boolean, force: :boolean])
 
-    {_, code} =
-      System.cmd("cargo", ["build", "--release", "--locked"],
-        cd: native,
-        into: IO.stream(:stdio, :line),
-        stderr_to_stdout: true
-      )
-
-    if code != 0, do: Mix.raise("native qlover build failed (exit #{code})")
+    source = Qlover.Binary.install!(opts)
     path = Path.expand(opts[:path] || "~/.local/bin/qlover")
     File.mkdir_p!(Path.dirname(path))
     temp = path <> ".#{System.pid()}.tmp"
-    File.cp!(Path.join(native, "target/release/qlover"), temp)
+    File.cp!(source, temp)
     File.chmod!(temp, 0o755)
     File.rename!(temp, path)
 

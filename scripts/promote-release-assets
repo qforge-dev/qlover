@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 2 ]] || { echo 'Usage: scripts/promote-release-assets INPUT_DIR OUTPUT_DIR' >&2; exit 64; }
+source_id=${QLOVER_SOURCE_ID:?QLOVER_SOURCE_ID is required}
+release_id=${QLOVER_RELEASE_ID:?QLOVER_RELEASE_ID is required}
+mkdir -p "$2"
+for suffix in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu .tar -docs.tar.gz; do
+  separator=-
+  [[ "$suffix" == .* || "$suffix" == -* ]] && separator=
+  name="qlover-$source_id$separator$suffix"
+  matches=()
+  while IFS= read -r -d '' file; do matches+=("$file"); done < <(find "$1" -type f -name "$name" -print0)
+  [[ ${#matches[@]} == 1 ]] || { echo "Expected exactly one $name" >&2; exit 1; }
+  cp "${matches[0]}" "$2/qlover-$release_id$separator$suffix"
+done
