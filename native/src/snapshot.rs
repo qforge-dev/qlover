@@ -1,100 +1,112 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-// Nanosecond ctime as well as mtime makes timestamp-preserving replacements
-// observable. Walk every directory on every request: no watcher delivery race,
-// and additions, deletions, symlink changes and atomic saves are all visible.
-pub fn capture(roots: &[String]) -> io::Result<Vec<u8>> {
-    let mut entries = BTreeMap::new();
-    for root in roots {
-        visit(Path::new(root), &mut entries, &mut Vec::new())?;
-    }
-    let mut out = Vec::new();
-    for (path, stamp) in entries {
-        crate::protocol::write_bytes(&mut out, path.as_os_str().as_encoded_bytes())?;
-        for n in stamp {
-            out.extend(n.to_be_bytes());
-        }
-    }
-    Ok(out)
+type Stamp = [u64; 7];
+
+#[derive(Clone)]
+struct Node {
+    stamp: Stamp,
+    children: Vec<PathBuf>,
 }
 
-fn visit(
-    path: &Path,
-    entries: &mut BTreeMap<PathBuf, [u64; 7]>,
-    ancestors: &mut Vec<PathBuf>,
-) -> io::Result<()> {
-    if entries.contains_key(path) {
-        return Ok(());
+// Scoped to ONE validation phase, never reused across requests. Overlapping
+// fingerprint groups share stat/directory reads while still recording their
+// own complete inputs. New phases always walk the filesystem afresh.
+#[derive(Default)]
+pub struct Scanner {
+    nodes: HashMap<PathBuf, Node>,
+}
+
+pub fn capture(roots: &[String]) -> io::Result<Vec<u8>> {
+    Scanner::default().capture(roots)
+}
+
+impl Scanner {
+    pub fn capture(&mut self, roots: &[String]) -> io::Result<Vec<u8>> {
+        let mut entries = BTreeMap::new();
+        for root in roots {
+            self.visit(Path::new(root), &mut entries)?;
+        }
+        let mut out = Vec::new();
+        for (path, stamp) in entries {
+            crate::protocol::write_bytes(&mut out, path.as_os_str().as_encoded_bytes())?;
+            for n in stamp {
+                out.extend(n.to_be_bytes());
+            }
+        }
+        Ok(out)
     }
+
+    fn visit(&mut self, path: &Path, entries: &mut BTreeMap<PathBuf, Stamp>) -> io::Result<()> {
+        if entries.contains_key(path) {
+            return Ok(());
+        }
+        let node = match self.nodes.get(path) {
+            Some(node) => node.clone(),
+            None => {
+                let node = read_node(path)?;
+                self.nodes.insert(path.to_owned(), node.clone());
+                node
+            }
+        };
+        entries.insert(path.to_owned(), node.stamp);
+        for child in node.children {
+            self.visit(&child, entries)?;
+        }
+        Ok(())
+    }
+}
+
+fn read_node(path: &Path) -> io::Result<Node> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            entries.insert(path.to_owned(), [0; 7]);
-            return Ok(());
+            return Ok(Node {
+                stamp: [0; 7],
+                children: Vec::new(),
+            })
         }
         Err(e) => return Err(e),
     };
-    entries.insert(
-        path.to_owned(),
-        [
-            meta.dev(),
-            meta.ino(),
-            meta.mode() as u64,
-            meta.size(),
-            meta.mtime() as u64,
-            meta.mtime_nsec() as u64,
-            (meta.ctime() as u64)
-                .wrapping_mul(1_000_000_000)
-                .wrapping_add(meta.ctime_nsec() as u64),
-        ],
-    );
+    let stamp = [
+        meta.dev(),
+        meta.ino(),
+        meta.mode() as u64,
+        meta.size(),
+        meta.mtime() as u64,
+        meta.mtime_nsec() as u64,
+        (meta.ctime() as u64)
+            .wrapping_mul(1_000_000_000)
+            .wrapping_add(meta.ctime_nsec() as u64),
+    ];
+    let children = children(path, &meta)?;
+    Ok(Node { stamp, children })
+}
+
+fn children(path: &Path, meta: &fs::Metadata) -> io::Result<Vec<PathBuf>> {
     if meta.file_type().is_symlink() {
-        let target = fs::read_link(path)?;
-        return visit_target(&path.parent().unwrap().join(target), entries, ancestors);
+        let target = path.parent().unwrap().join(fs::read_link(path)?);
+        let target = match fs::canonicalize(&target) {
+            Ok(canonical) => canonical,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => target,
+            Err(e) => return Err(e),
+        };
+        return Ok(vec![target]);
     }
+    let mut children = Vec::new();
     if meta.is_dir() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            if !ignored(&entry.file_name().to_string_lossy()) {
-                visit(&entry.path(), entries, ancestors)?;
+            if !matches!(
+                entry.file_name().to_string_lossy().as_ref(),
+                ".git" | ".mix" | "qlover_instrumented" | "node_modules" | "target"
+            ) {
+                children.push(entry.path());
             }
         }
     }
-    Ok(())
-}
-
-fn visit_target(
-    path: &Path,
-    entries: &mut BTreeMap<PathBuf, [u64; 7]>,
-    ancestors: &mut Vec<PathBuf>,
-) -> io::Result<()> {
-    let canonical = match fs::canonicalize(path) {
-        Ok(path) => path,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            entries.insert(path.to_owned(), [0; 7]);
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
-    if ancestors.contains(&canonical) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "cyclic input symlink",
-        ));
-    }
-    ancestors.push(canonical.clone());
-    let result = visit(&canonical, entries, ancestors);
-    ancestors.pop();
-    result
-}
-
-fn ignored(name: &str) -> bool {
-    matches!(
-        name,
-        ".git" | ".mix" | "qlover_instrumented" | "node_modules" | "target"
-    )
+    Ok(children)
 }

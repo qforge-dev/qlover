@@ -13,9 +13,9 @@ defmodule Qlover.Native do
 
       {_, 0} =
         System.cmd(System.fetch_env!("QLOVER_CLIENT"), [
-          "--snapshot",
+          "--prepare",
           path <> ".roots",
-          path <> ".before"
+          path
         ])
 
       restore_memo(path)
@@ -105,13 +105,6 @@ defmodule Qlover.Native do
   end
 
   defp restore_memo(path) do
-    {_, 0} =
-      System.cmd(System.fetch_env!("QLOVER_CLIENT"), [
-        "--memo-restore",
-        path <> ".memo",
-        path <> ".restored"
-      ])
-
     terms = read_strings(File.read!(path <> ".restored"))
 
     cache =
@@ -177,6 +170,7 @@ defmodule Qlover.Native do
       "test",
       "mix.exs",
       "mix.lock",
+      "VERSION",
       "rebar.config",
       "rebar.lock",
       "Makefile"
@@ -191,7 +185,8 @@ defmodule Qlover.Native do
       settings.elixirc_paths ++
         settings.test_paths ++
         settings.gate_paths ++
-        ["priv", "mix.exs", "mix.lock", build] ++ dependency_inputs ++ beams
+        ["priv", "mix.exs", "mix.lock", "VERSION", "mise.toml", ".tool-versions", build] ++
+        dependency_inputs ++ beams
 
     Enum.map(roots ++ manifest_inputs(build, settings) ++ toolchain_inputs(), &Path.expand/1)
     |> Enum.uniq()

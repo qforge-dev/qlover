@@ -5,7 +5,12 @@ use std::path::Path;
 
 // Values are opaque, versioned Erlang terms. Only exact input metadata matches
 // admit them; missing/corrupt data always falls back to recomputing fingerprints.
+#[cfg(test)]
 pub fn save(base: &Path) -> io::Result<()> {
+    save_with(base, &mut snapshot::Scanner::default())
+}
+
+pub fn save_with(base: &Path, scanner: &mut snapshot::Scanner) -> io::Result<()> {
     let raw = protocol::read_strings(&mut File::open(base.with_extension("memo.raw"))?)?;
     let mut iter = raw.into_iter();
     let mut output = Vec::new();
@@ -19,7 +24,7 @@ pub fn save(base: &Path) -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated memo"));
         }
         protocol::write_strings(&mut output, &roots)?;
-        protocol::write_bytes(&mut output, &snapshot::capture(&roots)?)?;
+        protocol::write_bytes(&mut output, &scanner.capture(&roots)?)?;
         protocol::write_bytes(&mut output, value.as_bytes())?;
     }
     let checksum = blake3::hash(&output);
@@ -29,18 +34,26 @@ pub fn save(base: &Path) -> io::Result<()> {
 }
 
 pub fn restore(source: &Path, target: &Path) -> io::Result<()> {
+    restore_with(source, target, &mut snapshot::Scanner::default())
+}
+
+pub fn restore_with(
+    source: &Path,
+    target: &Path,
+    scanner: &mut snapshot::Scanner,
+) -> io::Result<()> {
     let mut values = Vec::new();
     // Parse completely before returning values. A partial/corrupt memo isn't a
     // partially trustworthy result.
     if let Ok(bytes) = fs::read(source) {
-        if let Ok(found) = verified(&bytes) {
+        if let Ok(found) = verified(&bytes, scanner) {
             values = found;
         }
     }
     protocol::write_strings(&mut File::create(target)?, &values)
 }
 
-fn verified(bytes: &[u8]) -> io::Result<Vec<String>> {
+fn verified(bytes: &[u8], scanner: &mut snapshot::Scanner) -> io::Result<Vec<String>> {
     if bytes.len() < 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -60,7 +73,7 @@ fn verified(bytes: &[u8]) -> io::Result<Vec<String>> {
         let roots = protocol::read_strings(&mut input)?;
         let stamp = read_stamp(&mut input)?;
         let value = protocol::read_bytes(&mut input)?;
-        if snapshot::capture(&roots)? == stamp {
+        if scanner.capture(&roots)? == stamp {
             result.push(
                 String::from_utf8(value)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,

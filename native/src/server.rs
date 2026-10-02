@@ -270,15 +270,16 @@ fn cache_result(state: &State, request: Vec<String>, code: i32) -> io::Result<Ca
     }
     let mut roots = protocol::read_strings(&mut File::open(receipt.with_extension("roots"))?)?;
     let before = fs::read(receipt.with_extension("before"))?;
-    if snapshot::capture(&roots)? != before {
+    let mut scanner = snapshot::Scanner::default();
+    if scanner.capture(&roots)? != before {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "inputs changed during tests",
         ));
     }
     roots.extend(fields[2..].iter().cloned());
-    let snapshot = snapshot::capture(&roots)?;
-    let _ = crate::memo::save(&receipt);
+    let snapshot = scanner.capture(&roots)?;
+    let _ = crate::memo::save_with(&receipt, &mut scanner);
     Ok(Cached {
         request,
         roots,
