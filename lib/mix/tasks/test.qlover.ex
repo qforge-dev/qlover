@@ -15,6 +15,10 @@ defmodule Mix.Tasks.Test.Qlover do
   when coverage is incomplete; the coverage gate still fails. Failed tests
   never advance a baseline.
 
+  Shared setup coverage is refreshed with focused runs. File-loading hits
+  belong to the loaded test file, including its tracked child processes.
+  Deleting files refreshes shared setup without executing remaining tests.
+
   There is no stale manifest involved: the file list comes from qlover's
   own evidence and reference graph, so selection is deterministic across
   worktrees, and a host `test` alias injecting
@@ -100,7 +104,6 @@ defmodule Mix.Tasks.Test.Qlover do
     test_counts: "the baseline has no test counts",
     gate_inputs: "gate inputs changed",
     dependencies: "compiled dependencies changed",
-    suite_evidence: "suite-level coverage needs a full refresh after test changes",
     source_map: "application source locations changed",
     unattributed_baseline: "the baseline has no runtime-attributed evidence",
     test_fixtures: "test fixtures or helpers changed",
@@ -152,7 +155,7 @@ defmodule Mix.Tasks.Test.Qlover do
   end
 
   @doc false
-  def default_runner(["test" | args]) do
+  def default_runner([task | args]) when task in ["test", "suite"] do
     dir = Mix.Project.manifest_path()
     File.mkdir_p!(dir)
 
@@ -172,6 +175,7 @@ defmodule Mix.Tasks.Test.Qlover do
             "--no-compile",
             "-e",
             "Qlover.TestCounts.install(#{inspect(path)}); " <>
+              if(task == "suite", do: "Qlover.Coverage.prepare_suite(); ", else: "") <>
               "coverage = Qlover.Coverage.prepare(System.argv()); " <>
               "Mix.Task.run(\"test\", System.argv()); Qlover.Coverage.finish(coverage)",
             "--" | args
@@ -289,12 +293,16 @@ defmodule Mix.Tasks.Test.Qlover do
   end
 
   defp execute_plan(
-         {:incremental, %{prove: prove, run: run}, baseline},
+         {:incremental, %{prove: prove, run: run} = plan, baseline},
          settings,
          runner,
          test_args
        ) do
-    run_focused!(settings, runner, test_args, prove, run, baseline)
+    refresh_suite? =
+      plan.test_changed and run == [] and
+        Map.get(Map.get(baseline, :attributed) || %{}, :suite, %{}) != %{}
+
+    run_focused!(settings, runner, test_args, prove, run, baseline, refresh_suite?)
   end
 
   defp run_full!(settings, runner, test_args, baseline) do
@@ -312,14 +320,17 @@ defmodule Mix.Tasks.Test.Qlover do
     )
   end
 
-  defp run_focused!(settings, runner, test_args, prove, run, baseline) do
-    if run != [] and runner == (&default_runner/1) and
+  defp run_focused!(settings, runner, test_args, prove, run, baseline, refresh_suite?) do
+    if (run != [] or refresh_suite?) and runner == (&default_runner/1) and
          Elixir.Qlover.Coverage.attributed_supported?(),
        do: require_complete_selection!(test_args, false)
 
     cond do
       run != [] ->
         Mix.shell().info("qlover: running #{length(run)} focused test file(s) with coverage...")
+
+      refresh_suite? ->
+        Mix.shell().info("qlover: refreshing shared setup coverage without running test files...")
 
       prove == [] ->
         Mix.shell().info("qlover: nothing to re-run; gating on the baseline...")
@@ -336,7 +347,7 @@ defmodule Mix.Tasks.Test.Qlover do
     end
 
     result =
-      if run != [] do
+      if run != [] or refresh_suite? do
         # NOTE: --no-stale is load-bearing here, not just cosmetic.
         # Host projects often alias `test` with `--stale` injected
         # (e.g. `test: [..., "test --stale"]`); without our own --no-stale
@@ -348,7 +359,7 @@ defmodule Mix.Tasks.Test.Qlover do
         # stays sound because all coverage comes from one code version.
         runner.(
           [
-            "test",
+            if(refresh_suite?, do: "suite", else: "test"),
             "--no-stale",
             "--cover",
             "--export-coverage",
@@ -365,7 +376,7 @@ defmodule Mix.Tasks.Test.Qlover do
         baseline,
         result,
         &Qlover.gate!/1,
-        run != [] and runner == (&default_runner/1) and
+        (run != [] or refresh_suite?) and runner == (&default_runner/1) and
           Elixir.Qlover.Coverage.attributed_supported?()
       )
     after
@@ -414,10 +425,6 @@ defmodule Mix.Tasks.Test.Qlover do
 
   defp full_run_message(:dependencies, _settings) do
     "qlover: compiled dependencies changed, running full suite..."
-  end
-
-  defp full_run_message(:suite_evidence, _settings) do
-    "qlover: suite-level coverage needs refresh, running full suite..."
   end
 
   defp full_run_message(:gate_inputs, settings), do: first_run_message(settings)

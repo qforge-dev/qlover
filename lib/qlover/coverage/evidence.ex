@@ -7,7 +7,7 @@ defmodule Qlover.Coverage.Evidence do
   def valid?(nil), do: true
 
   def valid?(%{
-        vsn: 1,
+        vsn: 2,
         otp: otp,
         elixir: elixir,
         complete: true,
@@ -119,7 +119,8 @@ defmodule Qlover.Coverage.Evidence do
   def fingerprint(inventory, sources), do: digest({inventory, sources})
 
   defp digest(value) do
-    :crypto.hash(:sha256, :erlang.term_to_binary(value)) |> Base.encode16(case: :lower)
+    :crypto.hash(:sha256, :erlang.term_to_binary(value, [:deterministic]))
+    |> Base.encode16(case: :lower)
   end
 
   def owners(nil, _beams), do: []
@@ -145,7 +146,7 @@ defmodule Qlover.Coverage.Evidence do
     source_hashes = sources(settings.compile_path)
 
     evidence = %{
-      vsn: 1,
+      vsn: 2,
       otp: System.otp_release(),
       elixir: System.version(),
       inventory: report.inventory,
@@ -158,7 +159,7 @@ defmodule Qlover.Coverage.Evidence do
       complete: true
     }
 
-    write_html!(settings, evidence)
+    write_html!(settings, evidence, nil)
     evidence
   end
 
@@ -246,7 +247,7 @@ defmodule Qlover.Coverage.Evidence do
       Mix.raise("changed application code without fresh test execution needs a full run")
     end
 
-    write_html!(settings, evidence)
+    write_html!(settings, evidence, previous)
     evidence
   end
 
@@ -265,47 +266,85 @@ defmodule Qlover.Coverage.Evidence do
     inventory
   end
 
-  defp write_html!(settings, evidence) do
-    for {mod, %{source: source, lines: lines}} <- evidence.inventory do
-      path = Path.expand(source, settings.project_root)
+  defp write_html!(settings, evidence, previous) do
+    hits = covered_lines(evidence)
+    previous_hits = if previous, do: covered_lines(previous), else: %{}
 
-      if File.regular?(path) do
-        executable = MapSet.new(lines)
+    for {mod, inventory} <- evidence.inventory do
+      output = Path.join(settings.output, mod <> ".html")
+      covered = Map.get(hits, mod, MapSet.new())
 
-        covered =
-          [evidence.suite | Enum.map(Map.values(evidence.rows), & &1.hits)]
-          |> Enum.flat_map(&Map.get(&1, mod, []))
-          |> MapSet.new()
+      unchanged? =
+        previous != nil and previous.inventory[mod] == inventory and
+          previous.sources[mod <> ".beam"] == evidence.sources[mod <> ".beam"] and
+          Map.get(previous_hits, mod, MapSet.new()) == covered
 
-        body =
-          path
-          |> File.stream!()
-          |> Enum.with_index(1)
-          |> Enum.map_join("", fn {text, number} ->
-            state =
-              cond do
-                MapSet.member?(covered, number) -> "covered"
-                MapSet.member?(executable, number) -> "missing"
-                true -> "other"
-              end
-
-            "<span class=\"#{state}\">#{number}: #{escape(text)}</span>"
-          end)
-
-        html =
-          "<!doctype html><meta charset=\"utf-8\"><title>#{escape(mod)}</title>" <>
-            "<style>.covered{background:#dfd}.missing{background:#fdd}</style>" <>
-            "<h1>#{escape(mod)}</h1><pre>#{body}</pre>"
-
-        output = Path.join(settings.output, mod <> ".html")
-        File.mkdir_p!(Path.dirname(output))
-        temp = output <> ".#{System.pid()}-#{System.unique_integer([:positive])}.tmp"
-        File.write!(temp, html)
-        File.rename!(temp, output)
+      unless unchanged? and File.regular?(output) do
+        render_html!(settings, mod, inventory, covered, output)
       end
     end
 
     :ok
+  end
+
+  defp render_html!(settings, mod, %{source: source, lines: lines}, covered, output) do
+    path = Path.expand(source, settings.project_root)
+
+    if File.regular?(path) do
+      executable = MapSet.new(lines)
+
+      body =
+        path
+        |> File.read!()
+        |> String.split("\n")
+        |> Enum.with_index(1)
+        |> Enum.map(fn {text, number} ->
+          state =
+            cond do
+              MapSet.member?(covered, number) -> "covered"
+              MapSet.member?(executable, number) -> "missing"
+              true -> "other"
+            end
+
+          [
+            "<span class=\"",
+            state,
+            "\">",
+            Integer.to_string(number),
+            ": ",
+            escape(text),
+            "\n</span>"
+          ]
+        end)
+
+      html = [
+        "<!doctype html><meta charset=\"utf-8\"><title>",
+        escape(mod),
+        "</title>",
+        "<style>.covered{background:#dfd}.missing{background:#fdd}</style><h1>",
+        escape(mod),
+        "</h1><pre>",
+        body,
+        "</pre>"
+      ]
+
+      File.mkdir_p!(Path.dirname(output))
+      temp = output <> ".#{System.pid()}-#{System.unique_integer([:positive])}.tmp"
+      File.write!(temp, html)
+      File.rename!(temp, output)
+    end
+  end
+
+  defp covered_lines(evidence) do
+    Enum.reduce(
+      [evidence.suite | Enum.map(Map.values(evidence.rows), & &1.hits)],
+      %{},
+      fn modules, acc ->
+        Enum.reduce(modules, acc, fn {mod, lines}, acc ->
+          Map.update(acc, mod, MapSet.new(lines), &MapSet.union(&1, MapSet.new(lines)))
+        end)
+      end
+    )
   end
 
   defp escape(value) do
@@ -318,7 +357,7 @@ defmodule Qlover.Coverage.Evidence do
 
   defp verify_report!(
          %{
-           vsn: 2,
+           vsn: 3,
            otp: otp,
            elixir: elixir,
            backend: :sys_coverage,
@@ -369,13 +408,12 @@ defmodule Qlover.Coverage.Evidence do
 
   def gate!(evidence, prior_rows), do: gate!(evidence, prior_rows, "")
 
-  defp gate!(%{inventory: inventory, rows: rows, suite: suite}, prior_rows, hint) do
+  defp gate!(%{inventory: inventory} = evidence, prior_rows, hint) do
+    hits = covered_lines(evidence)
+
     failures =
       for {mod, %{source: source, lines: lines}} <- inventory,
-          covered =
-            [suite | Enum.map(Map.values(rows), & &1.hits)]
-            |> Enum.flat_map(&Map.get(&1, mod, []))
-            |> MapSet.new(),
+          covered = Map.get(hits, mod, MapSet.new()),
           missing = Enum.reject(lines, &MapSet.member?(covered, &1)),
           missing != [],
           do: {mod, source, length(lines) - length(missing), length(lines), missing}

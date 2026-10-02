@@ -16,7 +16,18 @@ defmodule Qlover.Coverage do
 
     if "--cover" in args and is_binary(System.get_env("QLOVER_ATTR_REPORT")) and
          attributed_supported?() do
-      Mix.ProjectStack.merge_config(test_coverage: Keyword.put(opts, :tool, __MODULE__))
+      test_opts = Mix.Project.config()[:test_elixirc_options] || []
+      tracers = Enum.uniq([Qlover.Coverage.Runtime | Keyword.get(test_opts, :tracers, [])])
+
+      Code.compiler_options(
+        tracers: Enum.uniq([Qlover.Coverage.Runtime | Code.get_compiler_option(:tracers)])
+      )
+
+      Mix.ProjectStack.merge_config(
+        test_coverage: Keyword.put(opts, :tool, __MODULE__),
+        test_elixirc_options: Keyword.put(test_opts, :tracers, tracers)
+      )
+
       nil
     else
       prepare_native(args, opts)
@@ -47,9 +58,10 @@ defmodule Qlover.Coverage do
       )
 
     instrument_us = System.monotonic_time(:microsecond) - instrument_started
-    runtime = Qlover.Coverage.Runtime.start!()
+    files = Qlover.TestCounts.test_files(Mix.Tasks.Qlover.settings([], []))
+    runtime = Qlover.Coverage.Runtime.start!(files)
 
-    fn ->
+    finish = fn ->
       for {name, _} <- inventory do
         unless :code.which(String.to_atom(name)) == ~c"qlover_instrumented" do
           raise "coverage target #{name} was reloaded during the test run"
@@ -60,7 +72,7 @@ defmodule Qlover.Coverage do
       {hits, suite, stats} = Qlover.Coverage.Runtime.finish!(runtime, inventory)
 
       report = %{
-        vsn: 2,
+        vsn: 3,
         otp: System.otp_release(),
         elixir: System.version(),
         backend: :sys_coverage,
@@ -105,6 +117,9 @@ defmodule Qlover.Coverage do
         end
       end
     end
+
+    Process.put({__MODULE__, :finish}, finish)
+    fn -> finish(nil) end
   end
 
   def read_report(path) do
@@ -115,7 +130,7 @@ defmodule Qlover.Coverage do
 
     with {:ok, bytes} <- File.read(path),
          %{
-           vsn: 2,
+           vsn: 3,
            otp: otp,
            elixir: elixir,
            backend: :sys_coverage,
@@ -140,7 +155,16 @@ defmodule Qlover.Coverage do
     _ -> nil
   end
 
-  def finish(nil), do: :ok
+  def prepare_suite do
+    Mix.ProjectStack.merge_config(test_load_filters: [], test_ignore_filters: [~r/.*/])
+  end
+
+  def finish(nil) do
+    case Process.delete({__MODULE__, :finish}) do
+      nil -> :ok
+      callback -> callback.()
+    end
+  end
 
   def finish(opts) do
     Mix.ProjectStack.merge_config(test_coverage: opts)

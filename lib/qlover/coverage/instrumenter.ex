@@ -28,7 +28,7 @@ defmodule Qlover.Coverage.Instrumenter do
     end
 
     identity =
-      {System.version(), :erlang.system_info(:version), :compile.module_info(:md5),
+      {File.cwd!(), System.version(), :erlang.system_info(:version), :compile.module_info(:md5),
        :sys_coverage.module_info(:md5), __MODULE__.module_info(:md5)}
 
     files

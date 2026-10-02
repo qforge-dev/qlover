@@ -285,10 +285,6 @@ defmodule Qlover.Attribution do
       {:full, :test_fixtures}
     else
       cond do
-        Map.get(input, :attributed, false) and changed != [] and
-            Map.get(input, :suite_dependent, false) ->
-          {:full, :suite_evidence}
-
         Map.get(input, :attributed, false) and
             not Map.get(input, :dependency_unchanged, false) ->
           {:full, :dependencies}

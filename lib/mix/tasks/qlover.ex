@@ -336,7 +336,6 @@ defmodule Mix.Tasks.Qlover do
       compiled_dirs: expand_dirs(settings.elixirc_paths, settings.project_root),
       project_root: settings.project_root,
       attributed: Map.get(baseline, :attributed) != nil,
-      suite_dependent: Map.get(Map.get(baseline, :attributed) || %{}, :suite, %{}) != %{},
       source_map_drift:
         Enum.any?(current_sources, fn {beam, hash} ->
           previous_sources[beam] != hash and beam not in beam_changed

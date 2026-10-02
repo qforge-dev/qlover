@@ -80,17 +80,70 @@ defmodule Qlover.TraceCoverageTest do
 
   test "editing one file reuses the other file's lines in the same shared module", %{tmp_dir: dir} do
     baseline!(dir)
+    html = Path.join(dir, "cover/Elixir.TraceFixture.Shared.html")
+    original = File.stat!(html)
     write_test!(dir, :a, branches: [:left], revision: 2)
 
     result = run_qlover(dir)
     assert_success(result)
     assert_executed(result, [:a])
     assert result.output =~ "qlover: ran 1 tests; didn't run 1 tests."
+    assert File.stat!(html).inode == original.inode
 
     unchanged = run_qlover(dir)
     assert_success(unchanged)
     assert_executed(unchanged, [])
     assert unchanged.output =~ "qlover: ran 0 tests; didn't run 2 tests."
+    assert File.stat!(html).inode == original.inode
+  end
+
+  test "file-loading hits and their spawned tasks stay owned by the loading file", %{tmp_dir: dir} do
+    write_test!(dir, :a, branches: [])
+    path = Path.join(dir, "test/a_test.exs")
+    body = File.read!(path)
+
+    File.write!(
+      path,
+      "Task.async(fn -> TraceFixture.Shared.branch(:left) end) |> Task.await()\n" <> body
+    )
+
+    baseline!(dir)
+
+    write_test!(dir, :b, branches: [:right], revision: 2)
+    retained = run_qlover(dir)
+    assert_success(retained)
+    assert_executed(retained, [:b])
+
+    File.write!(path, body)
+    removed = run_qlover(dir)
+    assert_coverage_failure(removed)
+    assert_executed(removed, [:a])
+    assert removed.output =~ "prior owners: [\"test/a_test.exs\"]"
+
+    assert File.read!(Path.join(dir, "cover/Elixir.TraceFixture.Shared.html")) =~
+             "class=\"missing\">6:"
+  end
+
+  test "deleting a test refreshes setup evidence without retaining conditional hits", %{
+    tmp_dir: dir
+  } do
+    write_test!(dir, :a, branches: [])
+    helper = Path.join(dir, "test/test_helper.exs")
+
+    File.write!(
+      helper,
+      File.read!(helper) <>
+        "\nif File.exists?(\"test/a_test.exs\"), do: TraceFixture.Shared.branch(:left)\n"
+    )
+
+    baseline!(dir)
+    File.rm!(Path.join(dir, "test/a_test.exs"))
+
+    removed = run_qlover(dir)
+    assert_coverage_failure(removed)
+    assert_executed(removed, [])
+    assert removed.output =~ "refreshing shared setup coverage"
+    assert removed.output =~ "ran 0 tests; didn't run 1 tests."
   end
 
   test "dry selection includes only the edited file and preserves the baseline", %{tmp_dir: dir} do

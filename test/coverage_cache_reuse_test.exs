@@ -5,7 +5,7 @@ defmodule Qlover.CoverageCacheReuseTest do
   @moduletag timeout: 120_000
   @root Path.expand("..", __DIR__)
 
-  test "test-helper execution is suite evidence and test edits refresh it conservatively", %{
+  test "test-helper evidence refreshes without rerunning unchanged test files", %{
     tmp_dir: dir
   } do
     project = Path.join(dir, "suite")
@@ -43,17 +43,30 @@ defmodule Qlover.CoverageCacheReuseTest do
     end
     """)
 
+    File.write!(Path.join(project, "test/other_test.exs"), """
+    defmodule CoverageSuite.OtherTest do
+      use ExUnit.Case
+      test "unrelated", do: assert(true)
+    end
+    """)
+
     cache = Path.join(dir, "cache")
     assert {_, 0} = run(project, cache, ["deps.get"])
     {first, 0} = run(project, cache, ["test.qlover", "--no-stale"])
-    assert first =~ "ran 1 tests; didn't run 0 tests."
+    assert first =~ "ran 2 tests; didn't run 0 tests."
 
     snapshot = Mix.Tasks.Qlover.read_baseline!(Path.join(project, "cover/.qlover_baseline"))
     assert snapshot.attributed.suite["Elixir.CoverageSuite"] != []
 
     File.write!(test_path, File.read!(test_path) <> "\n# test edit\n")
     {refresh, 0} = run(project, cache, ["test.qlover"])
-    assert refresh =~ "suite-level coverage needs refresh, running full suite"
+    assert refresh =~ "running 1 focused test file(s)"
+    assert refresh =~ "ran 1 tests; didn't run 1 tests."
+
+    File.rm!(test_path)
+    {deleted, 0} = run(project, cache, ["test.qlover"])
+    assert deleted =~ "refreshing shared setup coverage"
+    assert deleted =~ "ran 0 tests; didn't run 1 tests."
   end
 
   test "attributed evidence is portable between identical worktrees", %{tmp_dir: dir} do
