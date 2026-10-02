@@ -166,6 +166,34 @@ defmodule Qlover.TraceCoverageTest do
     assert removed.output =~ "prior owners: [\"test/a_test.exs\"]"
   end
 
+  test "mixed production and test edits do not expand unchanged test-file references", %{
+    tmp_dir: dir
+  } do
+    source = Path.join(dir, "lib/independent.ex")
+    File.write!(source, "defmodule TraceFixture.Independent do\n  def value, do: :before\nend\n")
+
+    File.write!(Path.join(dir, "test/c_test.exs"), """
+    defmodule TraceFixture.CTest do
+      use ExUnit.Case, async: true
+      test "independent" do
+        File.write!(Path.join(System.fetch_env!("QLOVER_TEST_EXECUTIONS"), "c"), "ran\\n", [:append])
+        assert TraceFixture.Independent.value() in [:before, :after]
+      end
+    end
+    """)
+
+    full = run_qlover(dir)
+    assert_success(full)
+    assert_executed(full, [:a, :b, :c])
+
+    write_test!(dir, :a, branches: [:left], revision: 2)
+    File.write!(source, String.replace(File.read!(source), ":before", ":after"))
+    focused = run_qlover(dir)
+    assert_success(focused)
+    assert_executed(focused, [:a, :c])
+    assert focused.output =~ "ran 2 tests; didn't run 1 tests."
+  end
+
   test "dry selection includes only the edited file and preserves the baseline", %{tmp_dir: dir} do
     baseline = baseline!(dir)
     write_test!(dir, :a, branches: [:left], revision: 2)

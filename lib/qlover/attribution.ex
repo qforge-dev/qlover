@@ -333,7 +333,12 @@ defmodule Qlover.Attribution do
          compiled_dirs,
          project_root
        ) do
-    changed_code = Enum.filter(diff.modified ++ diff.removed, &code_file?/1)
+    # Attributed runs replace changed/deleted files' complete coverage rows.
+    # Their old references must not expand a simultaneous production edit.
+    changed_code =
+      if Map.get(input, :attributed, false),
+        do: [],
+        else: Enum.filter(diff.modified ++ diff.removed, &code_file?/1)
 
     if Enum.any?(changed_code, &unknown_refs?(baseline_tests, &1)) do
       {:full, :unattributed}
@@ -359,7 +364,10 @@ defmodule Qlover.Attribution do
       expand_mods =
         ((prove |> Enum.map(&beam_module_string/1)) ++ deleted_mods) |> Enum.uniq()
 
-      test_changed = Enum.any?(diff.added ++ diff.modified, &code_file?/1)
+      test_changed =
+        if Map.get(input, :attributed, false),
+          do: diff.added ++ diff.modified ++ diff.removed != [],
+          else: Enum.any?(diff.added ++ diff.modified, &code_file?/1)
 
       # The run set is the complete execution list: changed files plus
       # every runnable referencer. There is no stale manifest involved —

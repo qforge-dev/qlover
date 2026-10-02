@@ -556,6 +556,26 @@ defmodule Qlover.AttributionTest do
            }) == {:incremental, %{prove: [], run: [], test_changed: false}}
   end
 
+  test "attributed deletion stays visible when an application module is also deleted" do
+    input = %{
+      attributed: true,
+      dependency_unchanged: true,
+      beam_changed: [],
+      beam_deleted: ["Elixir.Gone"],
+      current_beams: %{},
+      baseline_tests: %{"t/a.exs" => %{sha: "old", modules: nil}},
+      current_tests: %{},
+      union_refs: %{},
+      lib_edges: %{},
+      fresh_lib_edges: %{},
+      compiled_dirs: [],
+      project_root: "/repo"
+    }
+
+    assert Attribution.plan(input) ==
+             {:incremental, %{prove: [], run: [], test_changed: true}}
+  end
+
   test "plan closes over fresh lib edges for changed beams" do
     assert Attribution.plan(%{
              beam_changed: ["Elixir.H.beam"],
