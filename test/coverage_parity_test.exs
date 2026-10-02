@@ -111,6 +111,52 @@ defmodule Qlover.CoverageParityTest do
     assert length(hits) < length(all)
   end
 
+  test "instrumentation cache repairs corruption and invalidates line and code edits", %{
+    tmp_dir: dir
+  } do
+    source = Path.join(dir, "cached.ex")
+    beams = Path.join(dir, "ebin")
+    File.mkdir_p!(beams)
+    File.write!(source, "defmodule QloverCacheParity do\n  def value, do: :before\nend\n")
+
+    {output, code} =
+      System.cmd(
+        "elixir",
+        ["-e", cache_script(), "--", source, beams, Mix.Project.compile_path()],
+        stderr_to_stdout: true
+      )
+
+    assert code == 0, output
+    assert output =~ "CACHE_OK"
+  end
+
+  defp cache_script do
+    """
+    [source, beams, qlover] = System.argv()
+    Code.prepend_path(qlover)
+    Code.compiler_options(debug_info: true, ignore_module_conflict: true)
+    compile = fn ->
+      [{module, binary}] = Code.compile_file(source)
+      File.write!(Path.join(beams, Atom.to_string(module) <> ".beam"), binary)
+    end
+    compile.()
+    {first, %{instrument_cache_misses: 1}} = Qlover.Coverage.Instrumenter.instrument_with_stats!(beams, [])
+    {^first, %{instrument_cache_hits: 1}} = Qlover.Coverage.Instrumenter.instrument_with_stats!(beams, [])
+    [cache] = Path.wildcard(Path.join([Path.dirname(beams), ".mix", "qlover_instrumented", "*"]))
+    File.write!(cache, "corrupt")
+    {^first, %{instrument_cache_misses: 1}} = Qlover.Coverage.Instrumenter.instrument_with_stats!(beams, [])
+    File.write!(source, "\\n" <> String.replace(File.read!(source), ":before", ":after"))
+    compile.()
+    {changed, %{instrument_cache_misses: 1}} = Qlover.Coverage.Instrumenter.instrument_with_stats!(beams, [])
+    if changed == first, do: raise("line shift reused old probes")
+    :ets.new(:qlover_attributed_hits, [:named_table, :public, :set])
+    :after = QloverCacheParity.value()
+    {^changed, %{instrument_cache_hits: 1}} = Qlover.Coverage.Instrumenter.instrument_with_stats!(beams, [])
+    :after = QloverCacheParity.value()
+    IO.puts("CACHE_OK")
+    """
+  end
+
   defp run_backend!(
          source,
          beams,
@@ -139,6 +185,10 @@ defmodule Qlover.CoverageParityTest do
         Code.ensure_loaded!(ExUnit.Runner)
         offline = Qlover.Coverage.Instrumenter.inventory!(beams, [Path.basename(beam)], [])
         inventory = Qlover.Coverage.Instrumenter.instrument!(beams, [])
+        {cached, stats} = Qlover.Coverage.Instrumenter.instrument_with_stats!(beams, [])
+        if cached != inventory, do: raise("cached inventory differs from fresh probes")
+        if stats.instrument_cache_hits != 1 or stats.instrument_cache_misses != 0,
+          do: raise("unchanged module was recompiled")
         if offline != inventory, do: raise("offline inventory differs from runtime probes")
         Qlover.Coverage.Runtime.start!()
         inventory

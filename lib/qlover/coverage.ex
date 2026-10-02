@@ -40,8 +40,11 @@ defmodule Qlover.Coverage do
     beams = Mix.Tasks.Qlover.beam_hashes(compile_path)
     instrument_started = System.monotonic_time(:microsecond)
 
-    inventory =
-      Qlover.Coverage.Instrumenter.instrument!(compile_path, opts[:ignore_modules] || [])
+    {inventory, instrument_stats} =
+      Qlover.Coverage.Instrumenter.instrument_with_stats!(
+        compile_path,
+        opts[:ignore_modules] || []
+      )
 
     instrument_us = System.monotonic_time(:microsecond) - instrument_started
     runtime = Qlover.Coverage.Runtime.start!()
@@ -68,7 +71,7 @@ defmodule Qlover.Coverage do
         hits: hits,
         suite: suite,
         metrics:
-          Map.merge(stats, %{
+          Map.merge(Map.merge(stats, instrument_stats), %{
             instrument_us: instrument_us,
             collect_us: System.monotonic_time(:microsecond) - collect_started
           })
@@ -108,6 +111,7 @@ defmodule Qlover.Coverage do
     # `:safe` rejects atoms absent from this VM. The collector runs in the
     # child, so load its known metric keys before decoding its report.
     Code.ensure_loaded!(Qlover.Coverage.Runtime)
+    Code.ensure_loaded!(Qlover.Coverage.Instrumenter)
 
     with {:ok, bytes} <- File.read(path),
          %{

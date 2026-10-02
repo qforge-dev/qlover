@@ -4,6 +4,11 @@ defmodule Qlover.Coverage.Instrumenter do
   # sys_coverage is the same (undocumented) executable-line transform used by
   # OTP cover. Fail closed if its representation changes.
   def instrument!(directory, ignores) do
+    {inventory, _stats} = instrument_with_stats!(directory, ignores)
+    inventory
+  end
+
+  def instrument_with_stats!(directory, ignores) do
     files = directory |> File.ls!() |> Enum.filter(&String.ends_with?(&1, ".beam"))
     collect!(directory, files, ignores, true)
   end
@@ -11,7 +16,8 @@ defmodule Qlover.Coverage.Instrumenter do
   # Extract the identical cover probe inventory without loading any module or
   # running a test. Used to reject obviously uncovered, unreferenced new code.
   def inventory!(directory, beams, ignores) do
-    collect!(directory, beams, ignores, false)
+    {inventory, _stats} = collect!(directory, beams, ignores, false)
+    inventory
   end
 
   defp collect!(directory, files, ignores, load?) do
@@ -21,77 +27,142 @@ defmodule Qlover.Coverage.Instrumenter do
       raise "attributed coverage requires the tested OTP 29 cover transform"
     end
 
+    identity =
+      {System.version(), :erlang.system_info(:version), :compile.module_info(:md5),
+       :sys_coverage.module_info(:md5), __MODULE__.module_info(:md5)}
+
     files
     |> Enum.sort()
-    |> Enum.reduce(%{}, fn file, acc ->
-      module = file |> Path.rootname() |> String.to_atom()
+    |> Enum.map(fn file -> {file, file |> Path.rootname() |> String.to_atom()} end)
+    |> Enum.reject(fn {_, module} ->
+      module in [Qlover.Coverage.Runtime, __MODULE__] or ignored?(module, ignores)
+    end)
+    |> Task.async_stream(
+      fn {file, module} -> artifact!(directory, file, module, identity, load?) end,
+      max_concurrency: min(System.schedulers_online(), 8),
+      ordered: false,
+      timeout: :infinity
+    )
+    |> Enum.reduce({%{}, %{instrument_cache_hits: 0, instrument_cache_misses: 0}}, fn
+      {:ok, {module, inventory, binary, cached?}}, {acc, stats} ->
+        if load?, do: load!(module, binary)
+        counter = if cached?, do: :instrument_cache_hits, else: :instrument_cache_misses
+        {Map.put(acc, Atom.to_string(module), inventory), Map.update!(stats, counter, &(&1 + 1))}
 
-      if module in [Qlover.Coverage.Runtime, Qlover.Coverage.Instrumenter] or
-           ignored?(module, ignores) do
-        acc
-      else
-        path = Path.join(directory, file)
+      {:exit, reason}, _ ->
+        exit(reason)
+    end)
+  end
 
-        case :beam_lib.chunks(String.to_charlist(path), [:abstract_code, :compile_info]) do
-          {:ok, {^module, chunks}} ->
-            {:raw_abstract_v1, forms} = Keyword.fetch!(chunks, :abstract_code)
-            info = Keyword.fetch!(chunks, :compile_info)
+  defp artifact!(directory, file, module, identity, load?) do
+    path = Path.join(directory, file)
+    beam = File.read!(path)
+    # Full BEAM bytes include line/debug information: executable hashes alone
+    # cannot safely key probes after source-line shifts or compiler changes.
+    key = :crypto.hash(:sha256, :erlang.term_to_binary({identity, beam}, [:deterministic]))
 
-            source =
-              info[:source]
-              |> to_string()
-              |> Qlover.Coverage.Evidence.source_path()
-              |> then(fn source -> if source, do: Path.relative_to_cwd(source), else: file end)
+    cache =
+      Path.join([Path.dirname(directory), ".mix", "qlover_instrumented", Base.encode16(key)])
 
-            map = :ets.new(:qlover_probe_map, [:set, :private])
+    case read_cached(cache, key, module) do
+      {:ok, inventory, binary} ->
+        {module, inventory, binary, true}
 
-            try do
-              index = fn _mod, fun, arity, clause, line ->
-                key = {fun, arity, clause, line}
+      :error ->
+        {inventory, binary} = transform!(beam, file, module, load?)
+        if load?, do: write_cached(cache, {key, module, inventory, binary})
+        {module, inventory, binary, false}
+    end
+  end
 
-                case :ets.lookup(map, key) do
-                  [{^key, id}] ->
-                    id
+  defp transform!(beam, file, module, load?) do
+    case :beam_lib.chunks(beam, [:abstract_code, :compile_info]) do
+      {:ok, {^module, chunks}} ->
+        {:raw_abstract_v1, forms} = Keyword.fetch!(chunks, :abstract_code)
+        info = Keyword.fetch!(chunks, :compile_info)
 
-                  [] ->
-                    id = :ets.info(map, :size) + 1
-                    :ets.insert(map, {key, id})
-                    id
-                end
-              end
+        source =
+          info[:source]
+          |> to_string()
+          |> Qlover.Coverage.Evidence.source_path()
+          |> then(fn source -> if source, do: Path.relative_to_cwd(source), else: file end)
 
-              {:ok, marked} = :sys_coverage.cover_transform(forms, index)
-              probes = :ets.tab2list(map) |> Map.new(fn {{_, _, _, line}, id} -> {id, line} end)
+        {marked, probes} = mark!(forms)
+        binary = if load?, do: compile!(rewrite(marked, module), module, source)
 
-              if load? do
-                rewritten = rewrite(marked, module)
-                opts = [:binary, :return_errors, :return_warnings, {:source, to_charlist(source)}]
+        {%{
+           source: source,
+           lines: probes |> Map.values() |> Enum.reject(&(&1 == 0)) |> Enum.uniq() |> Enum.sort(),
+           probes: probes
+         }, binary}
 
-                case :compile.forms(rewritten, opts) do
-                  {:ok, ^module, binary} -> load!(module, binary)
-                  # Elixir-generated variables (for example pinned receive refs)
-                  # can warn when recompiled as Erlang. A successful compilation
-                  # still provides valid instrumented code; only errors abort.
-                  {:ok, ^module, binary, _warnings} -> load!(module, binary)
-                  other -> raise "cannot instrument #{inspect(module)}: #{inspect(other)}"
-                end
-              end
+      other ->
+        raise "cannot read coverage abstract code for #{file}: #{inspect(other)}"
+    end
+  end
 
-              Map.put(acc, Atom.to_string(module), %{
-                source: source,
-                lines:
-                  probes |> Map.values() |> Enum.reject(&(&1 == 0)) |> Enum.uniq() |> Enum.sort(),
-                probes: probes
-              })
-            after
-              :ets.delete(map)
-            end
+  defp mark!(forms) do
+    map = :ets.new(:qlover_probe_map, [:set, :private])
 
-          other ->
-            raise "cannot read coverage abstract code for #{path}: #{inspect(other)}"
+    try do
+      index = fn _mod, fun, arity, clause, line ->
+        key = {fun, arity, clause, line}
+
+        case :ets.lookup(map, key) do
+          [{^key, id}] ->
+            id
+
+          [] ->
+            id = :ets.info(map, :size) + 1
+            :ets.insert(map, {key, id})
+            id
         end
       end
-    end)
+
+      {:ok, marked} = :sys_coverage.cover_transform(forms, index)
+      {marked, :ets.tab2list(map) |> Map.new(fn {{_, _, _, line}, id} -> {id, line} end)}
+    after
+      :ets.delete(map)
+    end
+  end
+
+  defp compile!(forms, module, source) do
+    opts = [:binary, :return_errors, :return_warnings, {:source, to_charlist(source)}]
+
+    case :compile.forms(forms, opts) do
+      {:ok, ^module, binary} -> binary
+      # Elixir-generated pinned receive refs can warn as Erlang; success is valid.
+      {:ok, ^module, binary, _warnings} -> binary
+      other -> raise "cannot instrument #{inspect(module)}: #{inspect(other)}"
+    end
+  end
+
+  defp read_cached(path, key, module) do
+    with {:ok, <<checksum::binary-size(32), payload::binary>>} <- File.read(path),
+         true <- :crypto.hash(:sha256, payload) == checksum,
+         {^key, ^module, %{source: source, lines: lines, probes: probes} = inventory, binary}
+         when is_binary(source) and is_list(lines) and is_map(probes) and is_binary(binary) <-
+           :erlang.binary_to_term(payload, [:safe]) do
+      {:ok, inventory, binary}
+    else
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp write_cached(path, artifact) do
+    payload = :erlang.term_to_binary(artifact, [:compressed])
+    temp = path <> ".#{System.pid()}-#{System.unique_integer([:positive])}.tmp"
+
+    try do
+      with :ok <- File.mkdir_p(Path.dirname(path)),
+           :ok <- File.write(temp, [:crypto.hash(:sha256, payload), payload]) do
+        File.rename(temp, path)
+      end
+    after
+      File.rm(temp)
+    end
   end
 
   defp load!(module, binary) do
