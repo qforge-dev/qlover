@@ -1,3 +1,4 @@
+mod memo;
 mod protocol;
 mod server;
 mod snapshot;
@@ -28,6 +29,16 @@ fn main() {
 
 fn run() -> io::Result<i32> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--worker") {
+        return worker(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("--memo-restore") && args.len() == 3 {
+        memo::restore(
+            std::path::Path::new(&args[1]),
+            std::path::Path::new(&args[2]),
+        )?;
+        return Ok(0);
+    }
     if args.first().map(String::as_str) == Some("--snapshot") {
         let roots = protocol::read_strings(&mut File::open(&args[1])?)?;
         fs::write(&args[2], snapshot::capture(&roots)?)?;
@@ -72,6 +83,24 @@ fn run() -> io::Result<i32> {
         return receive(&mut connection);
     }
     Ok(code)
+}
+
+fn worker(args: &[String]) -> io::Result<i32> {
+    // A dedicated pipe ties the entire worker group to the coordinator's
+    // lifetime, including SIGKILL/crashes where no cleanup handler can run.
+    std::thread::spawn(|| {
+        let mut byte = [0];
+        let _ = io::stdin().read(&mut byte);
+        unsafe {
+            libc::kill(-(std::process::id() as i32), libc::SIGKILL);
+        }
+    });
+    let status = Command::new("mix")
+        .arg("test.qlover")
+        .args(args)
+        .stdin(Stdio::null())
+        .status()?;
+    Ok(status.code().unwrap_or(1))
 }
 
 pub fn revision() -> io::Result<String> {

@@ -128,6 +128,98 @@ defmodule Qlover.NativeTest do
     assert baseline == File.read!(Path.join(dir, "cover/.qlover_baseline"))
   end
 
+  test "disconnecting a client cancels its worker and releases the project queue", %{tmp_dir: dir} do
+    test = Path.join(dir, "test/example_test.exs")
+    original = File.read!(test)
+
+    File.write!(
+      test,
+      String.replace(
+        original,
+        "assert(NativeFixture.value() == :ok)",
+        "(IO.puts(\"NATIVE_WORKER_READY\"); Process.sleep(:infinity))"
+      )
+    )
+
+    port =
+      Port.open({:spawn_executable, @binary}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        {:cd, dir},
+        {:env,
+         [{~c"ERL_FLAGS", ~c"+S 2"}, {~c"QLOVER_CACHE_DIR", to_charlist(Path.join(dir, "cache"))}]}
+      ])
+
+    await_output(port, "")
+    {:os_pid, pid} = Port.info(port, :os_pid)
+    assert {_, 0} = System.cmd("kill", ["-KILL", Integer.to_string(pid)])
+    assert_receive {^port, {:exit_status, _}}, 5_000
+    File.write!(test, original)
+    task = Task.async(fn -> native(dir) end)
+    {recovered, 0} = Task.await(task, 15_000)
+    assert recovered =~ "ran 1 tests;"
+  end
+
+  test "external compiler resources invalidate the daemon", %{tmp_dir: dir} do
+    resource = Path.join(dir, "external.txt")
+    File.write!(resource, "before")
+    source = Path.join(dir, "lib/example.ex")
+
+    File.write!(source, """
+    defmodule NativeFixture do
+      @external_resource #{inspect(resource)}
+      @value File.read!(@external_resource)
+      def value, do: @value
+    end
+    """)
+
+    test = Path.join(dir, "test/example_test.exs")
+    File.write!(test, String.replace(File.read!(test), "== :ok", "in [\"before\", \"after\"]"))
+    assert {_, 0} = native(dir)
+    {warm, 0} = native(dir)
+    assert warm =~ "reusing verified coverage (daemon)"
+    File.write!(resource, "after")
+    {changed, 0} = native(dir)
+    refute changed =~ "reusing verified coverage (daemon)"
+    assert changed =~ "ran 1 tests;"
+  end
+
+  test "a killed daemon releases its socket and a replacement client restarts it", %{tmp_dir: dir} do
+    assert {_, 0} = native(dir)
+    {status, 0} = native(dir, ["--status"])
+    [_, pid] = Regex.run(~r/daemon (\d+)/, status)
+    assert {_, 0} = System.cmd("kill", ["-KILL", pid])
+    {recovered, 0} = native(dir)
+    refute recovered =~ "reusing verified coverage (daemon)"
+    replacement = Path.join(dir, "replacement-qlover")
+    File.cp!(@binary, replacement)
+
+    {restarted, 0} =
+      System.cmd(replacement, [],
+        cd: dir,
+        stderr_to_stdout: true,
+        env: [{"ERL_FLAGS", "+S 2"}, {"QLOVER_CACHE_DIR", Path.join(dir, "cache")}]
+      )
+
+    refute restarted =~ "reusing verified coverage (daemon)"
+    {next_status, 0} = native(dir, ["--status"])
+    refute next_status == status
+  end
+
+  defp await_output(port, output) do
+    if String.contains?(output, "NATIVE_WORKER_READY") do
+      :ok
+    else
+      receive do
+        {^port, {:data, bytes}} -> await_output(port, output <> bytes)
+        {^port, {:exit_status, code}} -> flunk("worker exited #{code}: #{output}")
+      after
+        15_000 -> flunk("worker did not start: #{output}")
+      end
+    end
+  end
+
   test "environment changes, baseline removal and forced runs invalidate cached results", %{
     tmp_dir: dir
   } do

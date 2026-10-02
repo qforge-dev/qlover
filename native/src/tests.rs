@@ -6,6 +6,42 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn fingerprint_memo_reuses_only_unchanged_entries_and_rejects_corruption() {
+    let dir = Directory::new();
+    let base = dir.0.join("receipt");
+    let a = dir.0.join("a.ex");
+    let b = dir.0.join("b.ex");
+    fs::write(&a, "a").unwrap();
+    fs::write(&b, "b").unwrap();
+    let entries = vec![
+        "value-a".into(),
+        "1".into(),
+        a.to_string_lossy().into_owned(),
+        "value-b".into(),
+        "1".into(),
+        b.to_string_lossy().into_owned(),
+    ];
+    protocol::write_strings(
+        &mut fs::File::create(base.with_extension("memo.raw")).unwrap(),
+        &entries,
+    )
+    .unwrap();
+    crate::memo::save(&base).unwrap();
+    fs::write(&a, "modified").unwrap();
+    let target = base.with_extension("restored");
+    crate::memo::restore(&base.with_extension("memo"), &target).unwrap();
+    assert_eq!(
+        protocol::read_strings(&mut fs::File::open(&target).unwrap()).unwrap(),
+        vec!["value-b"]
+    );
+    fs::write(base.with_extension("memo"), "corrupt").unwrap();
+    crate::memo::restore(&base.with_extension("memo"), &target).unwrap();
+    assert!(protocol::read_strings(&mut fs::File::open(target).unwrap())
+        .unwrap()
+        .is_empty());
+}
+
 struct Directory(std::path::PathBuf);
 impl Directory {
     fn new() -> Self {

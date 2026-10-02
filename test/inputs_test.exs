@@ -13,7 +13,12 @@ defmodule Qlover.InputsTest do
     Qlover.Inputs.start()
     Qlover.Inputs.fetch(:a, count)
     assert Process.get(:reads) == 4
+    cache = Qlover.Inputs.snapshot()
     Qlover.Inputs.stop()
+    assert Qlover.Inputs.snapshot() == %{}
+    Qlover.Inputs.fetch(:a, count)
+    assert Process.get(:reads) == 5
+    Qlover.Inputs.restore(cache)
     Qlover.Inputs.fetch(:a, count)
     assert Process.get(:reads) == 5
   end

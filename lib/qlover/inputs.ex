@@ -5,6 +5,8 @@ defmodule Qlover.Inputs do
   # caller clears this cache before validating and committing fresh evidence.
   def start, do: Process.put(__MODULE__, %{})
   def stop, do: Process.delete(__MODULE__)
+  def snapshot, do: Process.get(__MODULE__, %{})
+  def restore(cache), do: Process.put(__MODULE__, cache)
 
   def fetch(key, fun) do
     case Process.get(__MODULE__) do

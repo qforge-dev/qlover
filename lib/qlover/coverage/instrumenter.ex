@@ -31,27 +31,33 @@ defmodule Qlover.Coverage.Instrumenter do
       {File.cwd!(), System.version(), :erlang.system_info(:version), :compile.module_info(:md5),
        :sys_coverage.module_info(:md5), __MODULE__.module_info(:md5)}
 
-    files
-    |> Enum.sort()
-    |> Enum.map(fn file -> {file, file |> Path.rootname() |> String.to_atom()} end)
-    |> Enum.reject(fn {_, module} ->
-      module in [Qlover.Coverage.Runtime, __MODULE__] or ignored?(module, ignores)
-    end)
-    |> Task.async_stream(
-      fn {file, module} -> artifact!(directory, file, module, identity, load?) end,
-      max_concurrency: min(System.schedulers_online(), 8),
-      ordered: false,
-      timeout: :infinity
-    )
-    |> Enum.reduce({%{}, %{instrument_cache_hits: 0, instrument_cache_misses: 0}}, fn
-      {:ok, {module, inventory, binary, cached?}}, {acc, stats} ->
-        if load?, do: load!(module, binary)
-        counter = if cached?, do: :instrument_cache_hits, else: :instrument_cache_misses
-        {Map.put(acc, Atom.to_string(module), inventory), Map.update!(stats, counter, &(&1 + 1))}
+    {inventory, stats, modules} =
+      files
+      |> Enum.sort()
+      |> Enum.map(fn file -> {file, file |> Path.rootname() |> String.to_atom()} end)
+      |> Enum.reject(fn {_, module} ->
+        module in [Qlover.Coverage.Runtime, __MODULE__] or ignored?(module, ignores)
+      end)
+      |> Task.async_stream(
+        fn {file, module} -> artifact!(directory, file, module, identity, load?) end,
+        max_concurrency: min(System.schedulers_online(), 8),
+        ordered: false,
+        timeout: :infinity
+      )
+      |> Enum.reduce({%{}, %{instrument_cache_hits: 0, instrument_cache_misses: 0}, []}, fn
+        {:ok, {module, inventory, binary, cached?}}, {acc, stats, modules} ->
+          counter = if cached?, do: :instrument_cache_hits, else: :instrument_cache_misses
 
-      {:exit, reason}, _ ->
-        exit(reason)
-    end)
+          {Map.put(acc, Atom.to_string(module), inventory),
+           Map.update!(stats, counter, &(&1 + 1)),
+           [{module, ~c"qlover_instrumented", binary} | modules]}
+
+        {:exit, reason}, _ ->
+          exit(reason)
+      end)
+
+    if load?, do: load_batch!(modules)
+    {inventory, stats}
   end
 
   defp artifact!(directory, file, module, identity, load?) do
@@ -169,6 +175,28 @@ defmodule Qlover.Coverage.Instrumenter do
     case :code.load_binary(module, ~c"qlover_instrumented", binary) do
       {:module, ^module} -> :ok
       other -> raise "cannot load instrumented #{inspect(module)}: #{inspect(other)}"
+    end
+  end
+
+  defp load_batch!(modules) do
+    case :code.atomic_load(modules) do
+      :ok ->
+        :ok
+
+      # OTP cannot atomically load modules with on_load callbacks. Fall back to
+      # the ordinary loader for that case, preserving callback semantics.
+      {:error, reasons} ->
+        if Enum.all?(reasons, fn {_, reason} -> reason in [:on_load_not_allowed, :not_purged] end) do
+          fallback = MapSet.new(Enum.map(reasons, &elem(&1, 0)))
+
+          {ordinary, batch} =
+            Enum.split_with(modules, fn {module, _, _} -> MapSet.member?(fallback, module) end)
+
+          Enum.each(ordinary, fn {module, _, binary} -> load!(module, binary) end)
+          if batch != [], do: load_batch!(batch)
+        else
+          raise "cannot load instrumented modules: #{inspect(reasons)}"
+        end
     end
   end
 

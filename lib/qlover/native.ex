@@ -1,6 +1,8 @@
 defmodule Qlover.Native do
   @moduledoc false
+  require Mix.Compilers.Elixir, as: Compiler
   @continuation {__MODULE__, :continuation}
+  @inputs {__MODULE__, :inputs}
 
   def prepare(settings) do
     Process.delete({__MODULE__, :gate})
@@ -15,6 +17,8 @@ defmodule Qlover.Native do
           path <> ".roots",
           path <> ".before"
         ])
+
+      restore_memo(path)
     end
   end
 
@@ -30,6 +34,8 @@ defmodule Qlover.Native do
       unless File.read!(path <> ".before") == File.read!(path <> ".after") do
         Mix.raise("qlover inputs changed during test execution; baseline not updated")
       end
+
+      if inputs = :persistent_term.get(@inputs, nil), do: Qlover.Inputs.restore(inputs)
     end
   end
 
@@ -40,6 +46,7 @@ defmodule Qlover.Native do
     # Registered before test helpers: their exit callbacks must succeed before
     # any baseline is committed, just as with the isolated child runner.
     System.at_exit(fn status -> complete(status, paths) end)
+    :persistent_term.put(@inputs, Qlover.Inputs.snapshot())
     Qlover.Inputs.stop()
     Qlover.TestCounts.install(base)
     project = Mix.Project.config()
@@ -67,6 +74,7 @@ defmodule Qlover.Native do
       end
     after
       :persistent_term.erase(@continuation)
+      :persistent_term.erase(@inputs)
       for path <- Tuple.to_list(paths), do: File.rm(path)
     end
   end
@@ -91,7 +99,69 @@ defmodule Qlover.Native do
         Path.expand(settings.baseline),
         Path.expand(settings.output)
       ])
+
+      write_memo(path, settings)
     end
+  end
+
+  defp restore_memo(path) do
+    {_, 0} =
+      System.cmd(System.fetch_env!("QLOVER_CLIENT"), [
+        "--memo-restore",
+        path <> ".memo",
+        path <> ".restored"
+      ])
+
+    terms = read_strings(File.read!(path <> ".restored"))
+
+    cache =
+      Map.new(terms, fn bytes -> bytes |> Base.decode64!() |> :erlang.binary_to_term([:safe]) end)
+
+    Qlover.Inputs.restore(cache)
+  rescue
+    _ -> Qlover.Inputs.start()
+  end
+
+  defp write_memo(path, settings) do
+    common =
+      Enum.map(settings.gate_paths, &Path.expand/1) ++
+        [Path.dirname(to_string(:code.which(__MODULE__)))]
+
+    entries =
+      Enum.flat_map(Qlover.Inputs.snapshot(), fn {key, value} ->
+        roots = memo_roots(key, settings)
+
+        if roots == [] do
+          []
+        else
+          roots = Enum.map(roots, &Path.expand/1) ++ common
+
+          [
+            Base.encode64(:erlang.term_to_binary({key, value}, [:compressed])),
+            Integer.to_string(length(roots)) | roots
+          ]
+        end
+      end)
+
+    write_strings(path <> ".memo.raw", entries)
+  end
+
+  defp memo_roots({:beams, dir}, _), do: [dir]
+  defp memo_roots({:sources, dir}, settings), do: [dir | settings.elixirc_paths]
+  defp memo_roots({:dependencies, dir}, _), do: [dir |> Path.dirname() |> Path.dirname()]
+  defp memo_roots({:tests, paths, _}, _), do: paths
+  defp memo_roots({:gate, paths, _}, _), do: paths
+  defp memo_roots(_, _), do: []
+
+  defp read_strings(<<count::unsigned-big-32, bytes::binary>>) do
+    {strings, <<>>} =
+      Enum.reduce(1..count//1, {[], bytes}, fn _,
+                                               {acc, <<size::unsigned-big-32, rest::binary>>} ->
+        <<value::binary-size(^size), tail::binary>> = rest
+        {[value | acc], tail}
+      end)
+
+    Enum.reverse(strings)
   end
 
   defp input_roots(settings) do
@@ -123,7 +193,27 @@ defmodule Qlover.Native do
         settings.gate_paths ++
         ["priv", "mix.exs", "mix.lock", build] ++ dependency_inputs ++ beams
 
-    Enum.map(roots ++ toolchain_inputs(), &Path.expand/1) |> Enum.uniq() |> Enum.sort()
+    Enum.map(roots ++ manifest_inputs(build, settings) ++ toolchain_inputs(), &Path.expand/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp manifest_inputs(build, settings) do
+    projects =
+      Map.new(Mix.Project.deps_paths(), fn {app, path} -> {Atom.to_string(app), path} end)
+
+    for manifest <- Path.wildcard(Path.join(build, "*/.mix/compile.elixir"), match_dot: true),
+        root =
+          Map.get(
+            projects,
+            manifest |> Path.dirname() |> Path.dirname() |> Path.basename(),
+            settings.project_root
+          ),
+        {_, sources} = Compiler.read_manifest(manifest),
+        {source, record} <- sources,
+        path <- [source | Enum.map(Compiler.source(record, :external), &elem(&1, 0))] do
+      Path.expand(path, root)
+    end
   end
 
   defp toolchain_inputs do

@@ -111,6 +111,24 @@ defmodule Qlover.CoverageParityTest do
     assert length(hits) < length(all)
   end
 
+  test "repeated probes and large coverage bitmaps retain native line parity", %{tmp_dir: dir} do
+    source = Path.join(dir, "bitmap.ex")
+    beams = Path.join(dir, "ebin")
+    File.mkdir_p!(beams)
+    functions = Enum.map_join(1..180, "\n", &"  def value_#{&1}, do: #{&1}")
+    File.write!(source, "defmodule QloverBitmapParity do\n#{functions}\nend\n")
+
+    calls =
+      "for _ <- 1..100, n <- 1..90, do: apply(module, String.to_atom(\"value_\" <> Integer.to_string(n)), [])"
+
+    native = run_backend!(source, beams, :native, calls)
+    attributed = run_backend!(source, beams, :attributed, calls)
+    assert attributed == native
+    {all, hits} = attributed
+    assert length(all) == 180
+    assert length(hits) == 90
+  end
+
   test "instrumentation cache repairs corruption and invalidates line and code edits", %{
     tmp_dir: dir
   } do
@@ -190,7 +208,7 @@ defmodule Qlover.CoverageParityTest do
         if stats.instrument_cache_hits != 1 or stats.instrument_cache_misses != 0,
           do: raise("unchanged module was recompiled")
         if offline != inventory, do: raise("offline inventory differs from runtime probes")
-        Qlover.Coverage.Runtime.start!()
+        Process.put(:coverage_runtime, Qlover.Coverage.Runtime.start!())
         inventory
       end
 
@@ -203,11 +221,9 @@ defmodule Qlover.CoverageParityTest do
         hits = for {{^module, line}, {count, _}} <- entries, line > 0, count > 0, do: line
         {Enum.sort(Enum.uniq(all)), Enum.sort(Enum.uniq(hits))}
       else
-        %{probes: probes, lines: all} = inventory[Atom.to_string(module)]
-        hits = for {{pid, ^module, id}} <- :ets.tab2list(:qlover_attributed_hits),
-                   pid == self(),
-                   line = probes[id], line > 0, do: line
-        {all, Enum.sort(Enum.uniq(hits))}
+        %{lines: all} = inventory[Atom.to_string(module)]
+        {_, suite, _} = Qlover.Coverage.Runtime.finish!(Process.get(:coverage_runtime), inventory)
+        {all, Map.get(suite, Atom.to_string(module), [])}
       end
 
     IO.puts("PARITY:" <> Base.encode64(:erlang.term_to_binary(result)))

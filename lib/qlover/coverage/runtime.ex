@@ -1,5 +1,6 @@
 defmodule Qlover.Coverage.Runtime do
   @moduledoc false
+  import Bitwise
   @table :qlover_attributed_hits
   @files {__MODULE__, :files}
 
@@ -53,7 +54,17 @@ defmodule Qlover.Coverage.Runtime do
         files -> {self(), files}
       end
 
-    :ets.insert(@table, {{context, module, id}})
+    word = div(id, 60)
+    key = {@table, context, module, word}
+    seen = Process.get(key, 0)
+    bit = 1 <<< rem(id, 60)
+
+    if (seen &&& bit) == 0 do
+      seen = seen ||| bit
+      Process.put(key, seen)
+      :ets.insert(@table, {{context, module, word}, seen})
+    end
+
     :ok
   end
 
@@ -92,30 +103,39 @@ defmodule Qlover.Coverage.Runtime do
 
     {hits, suite} =
       records
-      |> Enum.reduce({%{}, %{}}, fn {{context, module, id}}, {files, suite} ->
+      |> Enum.reduce({%{}, %{}}, fn {{context, module, word}, mask}, {files, suite} ->
         {pid, source} = hit_owner(context, state)
+        name = Atom.to_string(module)
 
-        with %{probes: probes} <- inventory[Atom.to_string(module)],
-             line when is_integer(line) and line > 0 <- probes[id] do
-          name = Atom.to_string(module)
+        if info = inventory[name] do
+          lines =
+            for bit <- 0..59,
+                (mask &&& 1 <<< bit) != 0,
+                line = info.probes[word * 60 + bit],
+                is_integer(line) and line > 0,
+                into: MapSet.new(),
+                do: line
 
           cond do
+            MapSet.size(lines) == 0 ->
+              {files, suite}
+
             is_binary(file = source) ->
               files =
-                Map.update(files, file, %{name => MapSet.new([line])}, fn modules ->
-                  Map.update(modules, name, MapSet.new([line]), &MapSet.put(&1, line))
+                Map.update(files, file, %{name => lines}, fn modules ->
+                  Map.update(modules, name, lines, &MapSet.union(&1, lines))
                 end)
 
               {files, suite}
 
             pid == suite_pid ->
-              {files, Map.update(suite, name, MapSet.new([line]), &MapSet.put(&1, line))}
+              {files, Map.update(suite, name, lines, &MapSet.union(&1, lines))}
 
             true ->
               {files, suite}
           end
         else
-          _ -> {files, suite}
+          {files, suite}
         end
       end)
 
@@ -127,7 +147,7 @@ defmodule Qlover.Coverage.Runtime do
       hit_records: length(records),
       traced_processes: map_size(state.parents),
       unknown_hit_records:
-        Enum.count(records, fn {{context, _, _}} ->
+        Enum.count(records, fn {{context, _, _}, _mask} ->
           {pid, file} = hit_owner(context, state)
           pid != suite_pid and file == nil
         end),

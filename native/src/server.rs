@@ -123,6 +123,9 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> io::Result<()> {
     }
     // Per-project request serialization, never a global lock across worktrees.
     let mut cached = state.cached.lock().unwrap();
+    if state.stopped.load(Ordering::SeqCst) {
+        return protocol::event(&mut stream, 4, b"restart");
+    }
     let revision = vars
         .iter()
         .find(|(k, _)| *k == "QLOVER_CLIENT_REVISION")
@@ -141,6 +144,9 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> io::Result<()> {
             protocol::event(&mut stream, 1, entry.output.as_bytes())?;
             return protocol::event(&mut stream, 3, &entry.code.to_be_bytes());
         }
+    }
+    if cached.as_ref().map(|entry| &entry.request) != Some(&request) {
+        let _ = fs::remove_file(state.directory.join("receipt.memo"));
     }
     *cached = None;
     let code = execute(&mut stream, state, args, &vars)?;
@@ -187,8 +193,8 @@ fn execute(
     for suffix in ["", ".before", ".roots"] {
         let _ = fs::remove_file(format!("{}{suffix}", receipt.display()));
     }
-    let mut child = Command::new("mix")
-        .arg("test.qlover")
+    let mut child = Command::new(env::current_exe()?)
+        .arg("--worker")
         .args(args)
         .current_dir(&state.project)
         .env_clear()
@@ -197,11 +203,12 @@ fn execute(
         .env("QLOVER_IN_PROCESS", "1")
         .env("QLOVER_RECEIPT", &receipt)
         .env("QLOVER_CLIENT", env::current_exe()?)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()?;
+    let _heartbeat = child.stdin.take();
     *state.child.lock().unwrap() = Some(child.id());
     let socket = Arc::new(Mutex::new(stream.try_clone()?));
     let out = pump(child.stdout.take().unwrap(), Arc::clone(&socket), 1);
@@ -271,6 +278,7 @@ fn cache_result(state: &State, request: Vec<String>, code: i32) -> io::Result<Ca
     }
     roots.extend(fields[2..].iter().cloned());
     let snapshot = snapshot::capture(&roots)?;
+    let _ = crate::memo::save(&receipt);
     Ok(Cached {
         request,
         roots,
