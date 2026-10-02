@@ -127,20 +127,27 @@ defmodule Mix.Tasks.Test.Qlover do
     runner = Keyword.get(options, :test_runner, &default_runner/1)
 
     Mix.Task.run("compile")
+    Elixir.Qlover.Inputs.start()
 
-    selection =
-      selection_plan(
-        settings,
-        flags,
-        runner == (&default_runner/1) and Elixir.Qlover.Coverage.attributed_supported?()
-      )
+    try do
+      Elixir.Qlover.Native.prepare(settings)
 
-    if Keyword.get(flags, :dry, false) do
-      print_dry_plan(selection, settings, test_args)
-    else
-      _ = File.rm(settings.export_path)
-      _ = File.rm(settings.expansion_export_path)
-      execute_plan(selection, settings, runner, test_args)
+      selection =
+        selection_plan(
+          settings,
+          flags,
+          runner == (&default_runner/1) and Elixir.Qlover.Coverage.attributed_supported?()
+        )
+
+      if Keyword.get(flags, :dry, false) do
+        print_dry_plan(selection, settings, test_args)
+      else
+        _ = File.rm(settings.export_path)
+        _ = File.rm(settings.expansion_export_path)
+        execute_plan(selection, settings, runner, test_args)
+      end
+    after
+      Elixir.Qlover.Inputs.stop()
     end
   end
 
@@ -156,6 +163,16 @@ defmodule Mix.Tasks.Test.Qlover do
 
   @doc false
   def default_runner([task | args]) when task in ["test", "suite"] do
+    if System.get_env("QLOVER_IN_PROCESS") == "1" do
+      Elixir.Qlover.Native.run_tests(task, args)
+    else
+      child_runner(task, args)
+    end
+  end
+
+  def default_runner(argv), do: run_child(argv, nil)
+
+  defp child_runner(task, args) do
     dir = Mix.Project.manifest_path()
     File.mkdir_p!(dir)
 
@@ -191,8 +208,6 @@ defmodule Mix.Tasks.Test.Qlover do
       File.rm(coverage_path)
     end
   end
-
-  def default_runner(argv), do: run_child(argv, nil)
 
   defp run_child(argv, coverage_path) do
     {_output, code} =
@@ -488,13 +503,29 @@ defmodule Mix.Tasks.Test.Qlover do
     prefix <> "references affected modules: " <> names
   end
 
+  defp finish_run!(settings, baseline, {:deferred, paths}, next, require_coverage?) do
+    Elixir.Qlover.Native.finalize(fn status ->
+      {code, report} = Elixir.Qlover.Native.reports(paths)
+
+      finish_run!(
+        settings,
+        baseline,
+        {if(status == 0, do: code, else: status), report},
+        next,
+        require_coverage?
+      )
+    end)
+  end
+
   defp finish_run!(settings, baseline, result, next, require_coverage?) do
+    Elixir.Qlover.Inputs.start()
     {code, report} = if is_tuple(result), do: result, else: {result, nil}
     counts = TestCounts.inventory(settings, baseline, report)
 
     try do
       case code do
         0 ->
+          Elixir.Qlover.Native.verify_inputs!()
           coverage = if report, do: report[:coverage]
 
           if require_coverage? and coverage == nil do
@@ -512,6 +543,8 @@ defmodule Mix.Tasks.Test.Qlover do
       end
     after
       Mix.shell().info(TestCounts.summary(counts, report))
+      Elixir.Qlover.Native.receipt(settings, counts)
+      Elixir.Qlover.Inputs.stop()
     end
   end
 

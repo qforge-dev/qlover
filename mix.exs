@@ -26,7 +26,8 @@ defmodule Qlover.MixProject do
           Qlover.Coverage,
           Qlover.Coverage.Evidence,
           Qlover.Coverage.Instrumenter,
-          Qlover.Coverage.Runtime
+          Qlover.Coverage.Runtime,
+          Qlover.Native
         ]
       ],
       aliases: aliases()
@@ -67,6 +68,9 @@ defmodule Qlover.MixProject do
       maintainers: ["Michal Warda"],
       files: [
         "lib",
+        "native/Cargo.toml",
+        "native/Cargo.lock",
+        "native/src",
         "cover.sh",
         "docs/assets",
         "VERSION",

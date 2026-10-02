@@ -51,6 +51,10 @@ defmodule Qlover.Coverage.Evidence do
   end
 
   def sources(directory) do
+    Elixir.Qlover.Inputs.fetch({:sources, directory}, fn -> source_hashes(directory) end)
+  end
+
+  defp source_hashes(directory) do
     root = File.cwd!()
 
     directory
@@ -110,6 +114,12 @@ defmodule Qlover.Coverage.Evidence do
   end
 
   def dependencies(compile_path) do
+    Elixir.Qlover.Inputs.fetch({:dependencies, compile_path}, fn ->
+      dependency_hash(compile_path)
+    end)
+  end
+
+  defp dependency_hash(compile_path) do
     directory = compile_path |> Path.expand() |> Path.dirname() |> Path.dirname()
 
     payload =
@@ -437,8 +447,12 @@ defmodule Qlover.Coverage.Evidence do
             "prior owners: #{inspect(prior_owners)})"
         end)
 
-      Mix.raise("qlover coverage is incomplete:\n" <> details <> hint)
+      message = "qlover coverage is incomplete:\n" <> details <> hint
+      Elixir.Qlover.Native.gate_result(1, message)
+      Mix.raise(message)
     end
+
+    Elixir.Qlover.Native.gate_result(0, "qlover holds for attributed coverage.\n")
 
     :ok
   end

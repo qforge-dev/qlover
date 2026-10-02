@@ -7,3 +7,4 @@
 /.elixir_ls/
 qlover-*.tar
 .DS_Store
+/native/target/

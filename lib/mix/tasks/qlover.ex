@@ -353,9 +353,11 @@ defmodule Mix.Tasks.Qlover do
 
   @doc false
   def test_hashes(settings) do
-    settings
-    |> list_test_files()
-    |> Map.new(fn abs -> {relativize(abs, settings.project_root), hash_file!(abs)} end)
+    Elixir.Qlover.Inputs.fetch({:tests, settings.test_paths, settings.project_root}, fn ->
+      settings
+      |> list_test_files()
+      |> Map.new(fn abs -> {relativize(abs, settings.project_root), hash_file!(abs)} end)
+    end)
   end
 
   @doc false
@@ -462,7 +464,9 @@ defmodule Mix.Tasks.Qlover do
 
   @doc false
   def beam_hashes(directory) do
-    directory |> list_beams!() |> Map.new(&{&1, beam_hash!(directory, &1)})
+    Elixir.Qlover.Inputs.fetch({:beams, directory}, fn ->
+      directory |> list_beams!() |> Map.new(&{&1, beam_hash!(directory, &1)})
+    end)
   end
 
   @doc false
@@ -486,17 +490,19 @@ defmodule Mix.Tasks.Qlover do
 
   @doc false
   def gate_hash(roots, relative_to \\ nil) do
-    root = relative_to || File.cwd!()
+    Elixir.Qlover.Inputs.fetch({:gate, roots, relative_to}, fn ->
+      root = relative_to || File.cwd!()
 
-    payload =
-      roots
-      |> Enum.flat_map(fn r -> [r | Path.wildcard(r <> "/**/*")] end)
-      |> Enum.filter(&File.regular?/1)
-      |> Enum.map(fn file -> {Path.relative_to(file, root), hash_file!(file)} end)
-      |> Enum.sort()
-      |> Enum.uniq()
+      payload =
+        roots
+        |> Enum.flat_map(fn r -> [r | Path.wildcard(r <> "/**/*")] end)
+        |> Enum.filter(&File.regular?/1)
+        |> Enum.map(fn file -> {Path.relative_to(file, root), hash_file!(file)} end)
+        |> Enum.sort()
+        |> Enum.uniq()
 
-    :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)
+      :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)
+    end)
   end
 
   @doc false
