@@ -55,10 +55,11 @@ defmodule Qlover.Coverage.Evidence do
     |> File.ls!()
     |> Enum.filter(&String.ends_with?(&1, ".beam"))
     |> Map.new(fn beam ->
-      path = Path.join(directory, beam) |> String.to_charlist()
+      path = Path.join(directory, beam)
+      binary = File.read!(path)
 
       source =
-        case :beam_lib.chunks(path, [:compile_info]) do
+        case :beam_lib.chunks(binary, [:compile_info]) do
           {:ok, {_, [compile_info: info]}} ->
             info[:source] && source_path(to_string(info[:source]))
 
@@ -71,7 +72,7 @@ defmodule Qlover.Coverage.Evidence do
       bytes =
         if source && File.regular?(source),
           do: File.read!(source),
-          else: File.read!(to_string(path))
+          else: binary
 
       {beam, :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)}
     end)

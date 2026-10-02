@@ -908,7 +908,8 @@ defmodule Mix.Tasks.Qlover do
   end
 
   defp beam_chunks(path) do
-    case :beam_lib.all_chunks(String.to_charlist(path)) do
+    # Reading once avoids beam_lib's file-server round trips for every chunk.
+    case :beam_lib.all_chunks(File.read!(path)) do
       {:ok, _module, chunks} -> {:ok, chunks}
       _error -> :error
     end
