@@ -158,7 +158,6 @@ defmodule Qlover.Coverage.Evidence do
       complete: true
     }
 
-    gate!(evidence, %{})
     write_html!(settings, evidence)
     evidence
   end
@@ -234,15 +233,13 @@ defmodule Qlover.Coverage.Evidence do
         rows: rows
     }
 
-    hint =
-      if changed != [] and report == nil,
-        do:
-          "\n  No known tests own the changed lines. If they are dynamically covered, run mix test.qlover --no-stale.",
-        else: ""
-
-    gate!(evidence, previous.rows, hint)
-
     if changed != [] and report == nil do
+      gate!(
+        evidence,
+        previous.rows,
+        "\n  No known tests own the changed lines. If they are dynamically covered, run mix test.qlover --no-stale."
+      )
+
       # There is no valid positive proof for newly changed executable code in
       # a zero-test run. If it has no executable points, a full run is still
       # needed to check behavior that static inventory cannot observe.
@@ -370,7 +367,7 @@ defmodule Qlover.Coverage.Evidence do
 
   defp verify_report!(_, _), do: Mix.raise("incomplete attributed coverage report")
 
-  defp gate!(evidence, prior_rows), do: gate!(evidence, prior_rows, "")
+  def gate!(evidence, prior_rows), do: gate!(evidence, prior_rows, "")
 
   defp gate!(%{inventory: inventory, rows: rows, suite: suite}, prior_rows, hint) do
     failures =

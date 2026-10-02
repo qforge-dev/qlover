@@ -206,6 +206,7 @@ defmodule Mix.Tasks.Qlover do
     warn_unknown_refs(snapshot.tests)
     prune_records!(settings, snapshot, current)
     Mix.shell().info("Wrote qlover baseline to #{settings.baseline}.")
+    if settings.coverage, do: Elixir.Qlover.Coverage.Evidence.gate!(snapshot.attributed, %{})
     :ok
   end
 
@@ -294,6 +295,7 @@ defmodule Mix.Tasks.Qlover do
         snapshot = Map.put(snapshot, :attributed, evidence)
         write_snapshot_if_changed!(settings, baseline, snapshot)
         prune_records!(settings, snapshot, current)
+        Elixir.Qlover.Coverage.Evidence.gate!(evidence, baseline.attributed.rows)
         Mix.shell().info("qlover holds for attributed coverage.")
         :ok
     end

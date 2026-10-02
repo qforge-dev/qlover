@@ -1,8 +1,8 @@
 defmodule Qlover.Coverage do
   @moduledoc false
 
-  # Keep Mix's instrumentation and HTML reports. For qlover full runs only,
-  # replace its rounded summary with a floored display and an exact gate.
+  # Keep Mix's instrumentation and HTML reports. Attributed runs defer gating
+  # to the parent, which saves complete evidence before enforcing coverage.
   def attributed_supported?, do: attributed_supported?(System.otp_release(), System.version())
 
   def attributed_supported?("29", elixir) when is_binary(elixir) do
@@ -98,8 +98,7 @@ defmodule Qlover.Coverage do
         summary = Keyword.get(opts, :summary, true)
 
         if summary != false do
-          threshold = if is_list(summary), do: Keyword.get(summary, :threshold, 90), else: 90
-          summarize(results, Enum.map(rows, &elem(&1, 0)), threshold)
+          summarize(results, Enum.map(rows, &elem(&1, 0)), nil)
         end
       end
     end
@@ -189,7 +188,7 @@ defmodule Qlover.Coverage do
     Mix.shell().info("")
 
     # Compare counts, never the floored display. A genuine 100% still passes.
-    if covered * 100 < total * threshold do
+    if threshold != nil and covered * 100 < total * threshold do
       Mix.shell().info("Coverage test failed, threshold not met:\n")
       Mix.shell().info("    Coverage:  #{percentage(covered, total)}%")
       Mix.shell().info("    Threshold: #{format_hundredths(floor(threshold * 100))}%\n")

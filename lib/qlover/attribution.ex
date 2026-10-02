@@ -226,7 +226,8 @@ defmodule Qlover.Attribution do
         payload
       end
 
-    :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)
+    :crypto.hash(:sha256, :erlang.term_to_binary(payload, [:deterministic]))
+    |> Base.encode16(case: :lower)
   end
 
   @doc false

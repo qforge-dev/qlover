@@ -11,7 +11,9 @@ defmodule Mix.Tasks.Test.Qlover do
   file, replaces its old hits, and combines them with other files' unchanged
   hits. Deleting a file gates directly from surviving evidence. Changed code,
   helpers, dependencies, and incompatible or missing evidence use a
-  conservative refresh. Failed tests or coverage never advance a baseline.
+  conservative refresh. Passing tests save complete attributed evidence even
+  when coverage is incomplete; the coverage gate still fails. Failed tests
+  never advance a baseline.
 
   There is no stale manifest involved: the file list comes from qlover's
   own evidence and reference graph, so selection is deterministic across

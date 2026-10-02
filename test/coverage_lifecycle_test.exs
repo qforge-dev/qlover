@@ -82,7 +82,7 @@ defmodule Qlover.CoverageLifecycleTest do
     assert failed =~ "coverage is incomplete"
     assert failed =~ "prior owners: [\"test/a_test.exs\"]"
     assert File.read!(Path.join(dir, "markers")) == "a\n"
-    assert File.read!(Path.join(dir, "cover/.qlover_baseline")) == baseline
+    refute File.read!(Path.join(dir, "cover/.qlover_baseline")) == baseline
 
     # A pure source-location shift can keep the executable BEAM hash stable.
     # It must not reuse a previous line-number inventory.

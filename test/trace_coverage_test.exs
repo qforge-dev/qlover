@@ -17,6 +17,67 @@ defmodule Qlover.TraceCoverageTest do
     :ok
   end
 
+  test "incomplete full coverage saves evidence for unchanged and focused runs", %{tmp_dir: dir} do
+    write_test!(dir, :a, branches: [])
+    full = run_qlover(dir)
+    assert_coverage_failure(full)
+    assert_executed(full, [:a, :b])
+    baseline = baseline_bytes(dir)
+
+    unchanged = run_qlover(dir)
+    assert_coverage_failure(unchanged)
+    assert_executed(unchanged, [])
+    assert unchanged.output =~ "ran 0 tests; didn't run 2 tests."
+    assert baseline_bytes(dir) == baseline
+
+    write_test!(dir, :a, branches: [], revision: 2)
+    edited = run_qlover(dir)
+    assert_coverage_failure(edited)
+    assert_executed(edited, [:a])
+    refute baseline_bytes(dir) == baseline
+
+    write_test!(dir, :a, branches: [:left], revision: 3)
+    fixed = run_qlover(dir)
+    assert_success(fixed)
+    assert_executed(fixed, [:a])
+  end
+
+  test "failed tests never save incomplete full or focused evidence", %{tmp_dir: dir} do
+    write_test!(dir, :a, branches: [])
+    path = Path.join(dir, "test/a_test.exs")
+    passing = File.read!(path)
+    failing = String.replace(passing, "== :ok", "== :wrong")
+    File.write!(path, failing)
+
+    failed = run_qlover(dir)
+    assert failed.code != 0, failed.output
+    assert failed.output =~ "test run failed"
+    refute File.exists?(Path.join(dir, "cover/.qlover_baseline"))
+
+    File.write!(path, passing)
+    assert_coverage_failure(run_qlover(dir))
+    baseline = baseline_bytes(dir)
+    File.write!(path, failing)
+    failed = run_qlover(dir)
+    assert failed.code != 0, failed.output
+    assert failed.output =~ "test run failed"
+    assert_executed(failed, [:a])
+    assert baseline_bytes(dir) == baseline
+  end
+
+  test "cached incomplete evidence still fails the gate without rerunning tests", %{tmp_dir: dir} do
+    write_test!(dir, :a, branches: [])
+    assert_coverage_failure(run_qlover(dir))
+    baseline = baseline_bytes(dir)
+    File.rm!(Path.join(dir, "cover/.qlover_baseline"))
+
+    cached = run_qlover(dir)
+    assert_coverage_failure(cached)
+    assert_executed(cached, [])
+    assert :erlang.binary_to_term(baseline_bytes(dir)) == :erlang.binary_to_term(baseline)
+    assert cached.output =~ "ran 0 tests; didn't run 2 tests."
+  end
+
   test "editing one file reuses the other file's lines in the same shared module", %{tmp_dir: dir} do
     baseline!(dir)
     write_test!(dir, :a, branches: [:left], revision: 2)
@@ -53,8 +114,12 @@ defmodule Qlover.TraceCoverageTest do
 
     result = run_qlover(dir)
     assert_coverage_failure(result)
-    assert baseline_bytes(dir) == baseline
+    refute baseline_bytes(dir) == baseline
     assert_executed(result, [:a])
+
+    unchanged = run_qlover(dir)
+    assert_coverage_failure(unchanged)
+    assert_executed(unchanged, [])
   end
 
   test "removing a shared line's hit retains the unchanged file's independent contribution", %{
@@ -91,7 +156,7 @@ defmodule Qlover.TraceCoverageTest do
 
     result = run_qlover(dir)
     assert_coverage_failure(result)
-    assert baseline_bytes(dir) == baseline
+    refute baseline_bytes(dir) == baseline
     assert_executed(result, [])
   end
 
@@ -112,7 +177,7 @@ defmodule Qlover.TraceCoverageTest do
     write_test!(dir, :a, branches: [])
     second = run_qlover(dir)
     assert_coverage_failure(second)
-    assert baseline_bytes(dir) == baseline
+    refute baseline_bytes(dir) == baseline
     assert_executed(second, [:a])
   end
 
@@ -130,7 +195,7 @@ defmodule Qlover.TraceCoverageTest do
     write_test!(dir, :a, branches: [])
     second = run_qlover(dir)
     assert_coverage_failure(second)
-    assert baseline_bytes(dir) == baseline
+    refute baseline_bytes(dir) == baseline
     assert_executed(second, [:a])
   end
 
@@ -144,8 +209,12 @@ defmodule Qlover.TraceCoverageTest do
 
     result = run_qlover(dir)
     assert_coverage_failure(result)
-    assert baseline_bytes(dir) == baseline
+    refute baseline_bytes(dir) == baseline
     assert_executed(result, [:a, :b])
+
+    unchanged = run_qlover(dir)
+    assert_coverage_failure(unchanged)
+    assert_executed(unchanged, [])
   end
 
   defp fixture!(dir) do

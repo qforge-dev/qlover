@@ -324,11 +324,11 @@ defmodule Qlover.TestCountsTest do
 
     {incomplete, code} = run.(["test.qlover"])
     assert code != 0
-    assert incomplete =~ "Coverage test failed, threshold not met:"
-    assert incomplete =~ "    Coverage:  50.00%"
-    assert incomplete =~ "    Threshold: 100.00%"
+    assert incomplete =~ "qlover coverage is incomplete:"
+    assert incomplete =~ "50.00% | Total"
+    assert incomplete =~ "Elixir.CountsDemo.Uncovered: 0/1 lines"
     assert incomplete =~ "qlover: ran 4 tests; didn't run 0 tests."
-    refute File.exists?(Path.join(dir, "cover/.qlover_baseline"))
+    assert File.exists?(Path.join(dir, "cover/.qlover_baseline"))
   end
 
   defp settings(dir) do
