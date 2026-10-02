@@ -69,7 +69,10 @@ defmodule Qlover.Coverage.Instrumenter do
 
                 case :compile.forms(rewritten, opts) do
                   {:ok, ^module, binary} -> load!(module, binary)
-                  {:ok, ^module, binary, []} -> load!(module, binary)
+                  # Elixir-generated variables (for example pinned receive refs)
+                  # can warn when recompiled as Erlang. A successful compilation
+                  # still provides valid instrumented code; only errors abort.
+                  {:ok, ^module, binary, _warnings} -> load!(module, binary)
                   other -> raise "cannot instrument #{inspect(module)}: #{inspect(other)}"
                 end
               end

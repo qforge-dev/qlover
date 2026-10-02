@@ -79,7 +79,49 @@ defmodule Qlover.CoverageParityTest do
     assert attributed == native
   end
 
-  defp run_backend!(source, beams, backend) do
+  test "pinned receive variables survive instrumentation with native coverage parity", %{
+    tmp_dir: dir
+  } do
+    source = Path.join(dir, "receive.ex")
+    beams = Path.join(dir, "ebin")
+    File.mkdir_p!(beams)
+
+    File.write!(source, """
+    defmodule QloverReceiveParity do
+      def await(ref) do
+        receive do
+          {^ref, :left} -> :left
+          {^ref, :right} -> :right
+        end
+      end
+    end
+    """)
+
+    calls = """
+    ref = make_ref()
+    send(self(), {ref, :left})
+    :left = module.await(ref)
+    """
+
+    native = run_backend!(source, beams, :native, calls)
+    attributed = run_backend!(source, beams, :attributed, calls)
+    assert attributed == native
+    {all, hits} = attributed
+    assert hits != []
+    assert length(hits) < length(all)
+  end
+
+  defp run_backend!(
+         source,
+         beams,
+         backend,
+         calls \\ """
+         module.branch(:left)
+         module.guarded(:x)
+         module.values([1, 2, 3])
+         module.rescued(0)
+         """
+       ) do
     script = """
     [source, beams, backend, qlover] = System.argv()
     Code.prepend_path(qlover)
@@ -102,10 +144,7 @@ defmodule Qlover.CoverageParityTest do
         inventory
       end
 
-    module.branch(:left)
-    module.guarded(:x)
-    module.values([1, 2, 3])
-    module.rescued(0)
+    #{calls}
 
     result =
       if backend == "native" do
@@ -124,13 +163,14 @@ defmodule Qlover.CoverageParityTest do
     IO.puts("PARITY:" <> Base.encode64(:erlang.term_to_binary(result)))
     """
 
-    {output, 0} =
+    {output, code} =
       System.cmd(
         "elixir",
         ["-e", script, "--", source, beams, to_string(backend), Mix.Project.compile_path()],
         stderr_to_stdout: true
       )
 
+    assert code == 0, output
     [_, encoded] = Regex.run(~r/PARITY:([A-Za-z0-9+\/=]+)/, output) || flunk(output)
     encoded |> Base.decode64!() |> :erlang.binary_to_term([:safe])
   end
