@@ -51,6 +51,8 @@ defmodule Qlover.Coverage.Evidence do
   end
 
   def sources(directory) do
+    root = File.cwd!()
+
     directory
     |> File.ls!()
     |> Enum.filter(&String.ends_with?(&1, ".beam"))
@@ -61,7 +63,7 @@ defmodule Qlover.Coverage.Evidence do
       source =
         case :beam_lib.chunks(binary, [:compile_info]) do
           {:ok, {_, [compile_info: info]}} ->
-            info[:source] && source_path(to_string(info[:source]))
+            info[:source] && source_path(to_string(info[:source]), root)
 
           _ ->
             nil
@@ -70,9 +72,10 @@ defmodule Qlover.Coverage.Evidence do
       # A separate source-map identity is required: stable BEAM hashes omit
       # the Line chunk and cannot distinguish line shifts.
       bytes =
-        if source && File.regular?(source),
-          do: File.read!(source),
-          else: binary
+        case source && File.read(source) do
+          {:ok, bytes} -> bytes
+          _ -> binary
+        end
 
       {beam, :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)}
     end)
@@ -81,8 +84,11 @@ defmodule Qlover.Coverage.Evidence do
   # A BEAM copied from another worktree may still name that worktree's
   # absolute source path. Never read its old source to validate *this* tree.
   def source_path(path) do
-    root = File.cwd!()
-    expanded = Path.expand(path)
+    source_path(path, File.cwd!())
+  end
+
+  defp source_path(path, root) do
+    expanded = Path.expand(path, root)
 
     if expanded == root or String.starts_with?(expanded, root <> "/") do
       expanded

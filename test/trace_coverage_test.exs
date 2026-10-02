@@ -146,6 +146,26 @@ defmodule Qlover.TraceCoverageTest do
     assert removed.output =~ "ran 0 tests; didn't run 1 tests."
   end
 
+  test "nested required files retain the loading test's ownership", %{tmp_dir: dir} do
+    write_test!(dir, :a, branches: [])
+    path = Path.join(dir, "test/a_test.exs")
+    body = File.read!(path)
+    File.write!(Path.join(dir, "test/load_helper.exs"), "TraceFixture.Shared.branch(:left)\n")
+    File.write!(path, "Code.require_file(\"load_helper.exs\", __DIR__)\n" <> body)
+    baseline!(dir)
+
+    write_test!(dir, :b, branches: [:right], revision: 2)
+    retained = run_qlover(dir)
+    assert_success(retained)
+    assert_executed(retained, [:b])
+
+    File.write!(path, body)
+    removed = run_qlover(dir)
+    assert_coverage_failure(removed)
+    assert_executed(removed, [:a])
+    assert removed.output =~ "prior owners: [\"test/a_test.exs\"]"
+  end
+
   test "dry selection includes only the edited file and preserves the baseline", %{tmp_dir: dir} do
     baseline = baseline!(dir)
     write_test!(dir, :a, branches: [:left], revision: 2)
