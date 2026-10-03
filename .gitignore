@@ -9,3 +9,4 @@ qlover-*.tar
 .DS_Store
 /native/target/
 /dist/
+/.env

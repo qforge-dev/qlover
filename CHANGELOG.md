@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Verified native binaries for Linux and macOS on x86_64 and ARM64, automatic
+  installation, and promotion of tested CI artifacts into stable releases.
+- A worktree-isolated native daemon with prewarmed disposable BEAM workers.
+
+### Changed
+
+- Reuse instrumented BEAMs, validated fingerprints, coverage unions, and bulk
+  filesystem reads to reduce incremental coverage overhead.
+- Keep mixed production and test edits focused with runtime-attributed coverage,
+  including file-loading ownership and incremental shared-setup refreshes.
+
+### Fixed
+
+- Save attributed coverage baselines before enforcing the coverage gate.
+- Accept Erlang compiler warnings when instrumenting Elixir modules.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added
