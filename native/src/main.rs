@@ -1,3 +1,4 @@
+mod files;
 mod memo;
 mod protocol;
 mod server;
@@ -30,6 +31,15 @@ fn main() {
 
 fn run() -> io::Result<i32> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--file-hashes") && args.len() >= 2 {
+        let values = files::hashes(&args[2..], std::path::Path::new(&args[1]))?;
+        protocol::write_strings(&mut io::stdout(), &values)?;
+        return Ok(0);
+    }
+    if args.first().map(String::as_str) == Some("--record-files") && args.len() == 2 {
+        files::records(std::path::Path::new(&args[1]), &mut io::stdout())?;
+        return Ok(0);
+    }
     if args.first().map(String::as_str) == Some("--prepare") && args.len() == 3 {
         let roots = protocol::read_strings(&mut File::open(&args[1])?)?;
         let base = std::path::Path::new(&args[2]);
@@ -61,7 +71,7 @@ fn run() -> io::Result<i32> {
         return Ok(0);
     }
     if args == ["--help"] {
-        println!("qlover [Mix test.qlover arguments]\nqlover --stop\nqlover --status\n\nPersistent native coordinator; isolated BEAM worker per changed run.\nQLOVER_IDLE_TIMEOUT: idle lifetime in seconds (default 600).");
+        println!("qlover [Mix test.qlover arguments]\nqlover --stop\nqlover --status\n\nPersistent native coordinator; isolated BEAM worker per changed run.\nQLOVER_IDLE_TIMEOUT: idle lifetime in seconds (default 600).\nQLOVER_PREWARM=0: disable the disposable prewarmed worker.\nQLOVER_TIMINGS=1: print coverage stage timings.");
         return Ok(0);
     }
     let directory = state_directory()?;

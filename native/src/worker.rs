@@ -123,10 +123,12 @@ pub fn supported(vars: &[(&str, &str)]) -> bool {
     };
     // Preserve custom Mix wrappers: only bypass the standard Elixir entrypoint.
     fs::read_to_string(mix).is_ok_and(|body| {
-        body.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .eq(["Mix.CLI.main()"])
+        body.lines().next() == Some("#!/usr/bin/env elixir")
+            && body
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .eq(["Mix.CLI.main()"])
     }) && path.and_then(|path| executable(path, "elixir")).is_some()
 }
 

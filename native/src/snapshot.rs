@@ -3,10 +3,10 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 type Stamp = [u64; 7];
 
-#[derive(Clone)]
 struct Node {
     stamp: Stamp,
     children: Vec<PathBuf>,
@@ -17,7 +17,7 @@ struct Node {
 // own complete inputs. New phases always walk the filesystem afresh.
 #[derive(Default)]
 pub struct Scanner {
-    nodes: HashMap<PathBuf, Node>,
+    nodes: HashMap<PathBuf, Arc<Node>>,
 }
 
 pub fn capture(roots: &[String]) -> io::Result<Vec<u8>> {
@@ -47,14 +47,14 @@ impl Scanner {
         let node = match self.nodes.get(path) {
             Some(node) => node.clone(),
             None => {
-                let node = read_node(path)?;
+                let node = Arc::new(read_node(path)?);
                 self.nodes.insert(path.to_owned(), node.clone());
                 node
             }
         };
         entries.insert(path.to_owned(), node.stamp);
-        for child in node.children {
-            self.visit(&child, entries)?;
+        for child in &node.children {
+            self.visit(child, entries)?;
         }
         Ok(())
     }

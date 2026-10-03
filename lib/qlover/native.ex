@@ -5,6 +5,20 @@ defmodule Qlover.Native do
   @inputs {__MODULE__, :inputs}
   @warm {__MODULE__, :warm}
 
+  def compile do
+    # Erlang's incremental compiler uses whole-second mtimes. A changed native
+    # request can arrive inside that second, so don't let it certify old code.
+    # Unchanged requests never enter BEAM; Elixir-only projects avoid this path.
+    erlang = Mix.Project.config()[:erlc_paths] || ["src"]
+
+    if System.get_env("QLOVER_RECEIPT") &&
+         Enum.any?(erlang, &(Path.wildcard(Path.join(&1, "**/*.erl")) != [])) do
+      Mix.Task.run("compile.erlang", ["--force"])
+    end
+
+    Mix.Task.run("compile")
+  end
+
   def measure(stage, fun) do
     if System.get_env("QLOVER_TIMINGS") == "1" do
       start = System.monotonic_time(:microsecond)
@@ -24,7 +38,8 @@ defmodule Qlover.Native do
     path = System.fetch_env!("QLOVER_RECEIPT")
     [_code, baseline, beams] = read_strings(File.read!(path <> ".preload"))
     Qlover.Inputs.start()
-    Mix.Tasks.Qlover.read_baseline!(baseline)
+    baseline = Mix.Tasks.Qlover.read_baseline!(baseline)
+    if evidence = Map.get(baseline, :attributed), do: Qlover.Coverage.Evidence.prewarm(evidence)
     :persistent_term.put(@warm, Qlover.Inputs.snapshot())
     Qlover.Coverage.Instrumenter.prewarm(beams)
   rescue
@@ -49,6 +64,29 @@ defmodule Qlover.Native do
             value
         end
     end
+  end
+
+  def test_hashes(settings, fallback) do
+    if System.get_env("QLOVER_RECEIPT") do
+      roots = Enum.map(settings.test_paths, &Path.expand(&1, settings.project_root))
+      native_pairs(["--file-hashes", settings.project_root | roots]) |> Map.new()
+    else
+      fallback.()
+    end
+  end
+
+  def records(directory, fallback) do
+    if System.get_env("QLOVER_RECEIPT") do
+      native_pairs(["--record-files", directory])
+      |> Enum.map(fn {file, bytes} -> {file, Qlover.Attribution.decode_record(bytes)} end)
+    else
+      fallback.()
+    end
+  end
+
+  defp native_pairs(args) do
+    {bytes, 0} = System.cmd(System.fetch_env!("QLOVER_CLIENT"), args)
+    bytes |> read_strings() |> Enum.chunk_every(2) |> Enum.map(fn [a, b] -> {a, b} end)
   end
 
   def prepare(settings) do
@@ -210,7 +248,7 @@ defmodule Qlover.Native do
 
   defp memo_roots({:beams, dir}, _), do: [dir]
   defp memo_roots({:raw_beams, dir}, _), do: [dir]
-  defp memo_roots({:sources, dir}, settings), do: [dir | settings.elixirc_paths]
+  defp memo_roots({:sources, dir}, settings), do: [dir | source_roots(settings)]
   defp memo_roots({:dependencies, dir}, _), do: [dir |> Path.dirname() |> Path.dirname()]
   defp memo_roots({:tests, paths, _}, _), do: paths
   defp memo_roots({:gate, paths, _}, _), do: paths
@@ -252,10 +290,21 @@ defmodule Qlover.Native do
     # Parent directory detects added/removed dependencies; scanner omits .mix
     # scratch files and instrumented caches, which are outputs of this run.
     roots =
-      settings.elixirc_paths ++
+      source_roots(settings) ++
         settings.test_paths ++
         settings.gate_paths ++
-        ["priv", "mix.exs", "mix.lock", "VERSION", "mise.toml", ".tool-versions", build] ++
+        [
+          "src",
+          "include",
+          "c_src",
+          "priv",
+          "mix.exs",
+          "mix.lock",
+          "VERSION",
+          "mise.toml",
+          ".tool-versions",
+          build
+        ] ++
         dependency_inputs ++ beams
 
     Enum.map(roots ++ manifest_inputs(build, settings) ++ toolchain_inputs(), &Path.expand/1)
@@ -279,6 +328,11 @@ defmodule Qlover.Native do
         path <- [source | Enum.map(Compiler.source(record, :external), &elem(&1, 0))] do
       Path.expand(path, root)
     end
+  end
+
+  defp source_roots(settings) do
+    settings.elixirc_paths ++
+      (Mix.Project.config()[:erlc_paths] || ["src"]) ++ ["include", "c_src"]
   end
 
   defp toolchain_inputs do

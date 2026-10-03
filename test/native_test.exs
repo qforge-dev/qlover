@@ -108,6 +108,27 @@ defmodule Qlover.NativeTest do
     assert status =~ "spare worker: None"
   end
 
+  test "native test fingerprints match Mix file enumeration and SHA-256", %{tmp_dir: dir} do
+    File.mkdir_p!(Path.join(dir, "test/fixtures/nested"))
+    File.mkdir_p!(Path.join(dir, "test/.hidden"))
+    File.write!(Path.join(dir, "test/fixtures/nested/data"), <<0, 255, 42>>)
+    File.write!(Path.join(dir, "test/.hidden/ignored"), "hidden")
+    File.ln_s!("fixtures", Path.join(dir, "test/linked"))
+    File.ln_s!("fixtures/nested/data", Path.join(dir, "test/data-link"))
+    assert {_, 0} = native(dir)
+    baseline = Mix.Tasks.Qlover.read_baseline!(Path.join(dir, "cover/.qlover_baseline"))
+
+    expected =
+      Path.wildcard(Path.join(dir, "test/**/*"))
+      |> Enum.filter(&File.regular?/1)
+      |> Map.new(fn path ->
+        sha = :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)
+        {Path.relative_to(path, dir), sha}
+      end)
+
+    assert Map.new(baseline.tests, fn {path, info} -> {path, info.sha} end) == expected
+  end
+
   test "preloaded evidence cannot hide a baseline changed after prewarming", %{tmp_dir: dir} do
     assert {_, 0} = native(dir)
     File.rm_rf!(Path.join(dir, "cache"))
@@ -248,6 +269,25 @@ defmodule Qlover.NativeTest do
     {changed, 0} = native(dir)
     refute changed =~ "reusing verified coverage (daemon)"
     assert changed =~ "ran 1 tests;"
+  end
+
+  test "Erlang source edits invalidate native results before recompilation", %{tmp_dir: dir} do
+    File.mkdir_p!(Path.join(dir, "src"))
+    source = Path.join(dir, "src/native_erlang.erl")
+    code = "-module(native_erlang).\n-export([value/0]).\nvalue() -> ok.\n"
+    File.write!(source, code)
+
+    File.write!(
+      Path.join(dir, "lib/example.ex"),
+      "defmodule NativeFixture do\n  def value, do: :native_erlang.value()\nend\n"
+    )
+
+    assert {_, 0} = native(dir)
+    File.write!(source, String.replace(code, "-> ok", "-> wrong"))
+    {output, code} = native(dir)
+    assert code != 0
+    refute output =~ "reusing verified coverage (daemon)"
+    assert output =~ "not gating"
   end
 
   test "a killed daemon releases its socket and a replacement client restarts it", %{tmp_dir: dir} do

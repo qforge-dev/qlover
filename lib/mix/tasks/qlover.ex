@@ -358,9 +358,13 @@ defmodule Mix.Tasks.Qlover do
   @doc false
   def test_hashes(settings) do
     Elixir.Qlover.Inputs.fetch({:tests, settings.test_paths, settings.project_root}, fn ->
-      settings
-      |> list_test_files()
-      |> Map.new(fn abs -> {relativize(abs, settings.project_root), hash_file!(abs)} end)
+      Elixir.Qlover.Native.measure(:test_hashes, fn ->
+        Elixir.Qlover.Native.test_hashes(settings, fn ->
+          settings
+          |> list_test_files()
+          |> Map.new(fn abs -> {relativize(abs, settings.project_root), hash_file!(abs)} end)
+        end)
+      end)
     end)
   end
 
@@ -824,9 +828,11 @@ defmodule Mix.Tasks.Qlover do
   end
 
   defp decoded_records(settings, current_tests) do
-    local = list_record_entries(settings.refs_dir)
-    cache = list_cache_record_entries(settings)
-    Attribution.merge_records(local, cache, current_tests)
+    Elixir.Qlover.Native.measure(:reference_records, fn ->
+      local = list_record_entries(settings.refs_dir)
+      cache = list_cache_record_entries(settings)
+      Attribution.merge_records(local, cache, current_tests)
+    end)
   end
 
   defp list_cache_record_entries(%{cache_dir: nil}), do: []
@@ -836,7 +842,9 @@ defmodule Mix.Tasks.Qlover do
   end
 
   defp list_record_entries(refs_dir) do
-    Elixir.Qlover.Inputs.fetch({:records, refs_dir}, fn -> read_record_entries(refs_dir) end)
+    Elixir.Qlover.Inputs.fetch({:records, refs_dir}, fn ->
+      Elixir.Qlover.Native.records(refs_dir, fn -> read_record_entries(refs_dir) end)
+    end)
   end
 
   defp read_record_entries(refs_dir) do

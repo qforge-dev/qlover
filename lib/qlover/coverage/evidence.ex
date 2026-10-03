@@ -4,6 +4,8 @@ defmodule Qlover.Coverage.Evidence do
   alias Mix.Tasks.Qlover
   alias Elixir.Qlover.TestCounts
 
+  def prewarm(evidence), do: covered_lines(evidence)
+
   def valid?(nil), do: true
 
   def valid?(%{
@@ -356,8 +358,18 @@ defmodule Qlover.Coverage.Evidence do
   end
 
   defp covered_lines(evidence) do
+    # Test text/count changes do not change the union when the actual hits are
+    # identical. Exact immutable hit maps are also safe across native phases.
+    rows = Map.new(evidence.rows, fn {file, row} -> {file, row.hits} end)
+
+    Elixir.Qlover.Inputs.fetch({:covered_lines, evidence.suite, rows}, fn ->
+      union_lines(evidence.suite, rows)
+    end)
+  end
+
+  defp union_lines(suite, rows) do
     Enum.reduce(
-      [evidence.suite | Enum.map(Map.values(evidence.rows), & &1.hits)],
+      [suite | Map.values(rows)],
       %{},
       fn modules, acc ->
         Enum.reduce(modules, acc, fn {mod, lines}, acc ->

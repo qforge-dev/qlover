@@ -7,7 +7,7 @@ defmodule Qlover.Coverage.Instrumenter do
     # Intern only names present in this project's BEAM directory. The bundle
     # still needs its exact input key checked after the next compilation.
     for file <- File.ls!(directory), String.ends_with?(file, ".beam") do
-      file |> Path.rootname() |> String.to_atom()
+      _ = file |> Path.rootname() |> String.to_atom()
     end
 
     path = bundle_path(directory)
@@ -83,21 +83,45 @@ defmodule Qlover.Coverage.Instrumenter do
             do: {file, :crypto.hash(:sha256, File.read!(Path.join(directory, file)))}
       end)
 
-    hashes = Enum.map(candidates, fn {file, _} -> {file, Map.fetch!(raw, file)} end)
-
-    key = :crypto.hash(:sha256, :erlang.term_to_binary({identity, hashes}, [:deterministic]))
+    hashes = Map.new(candidates, fn {file, _} -> {file, Map.fetch!(raw, file)} end)
+    compiler = :crypto.hash(:sha256, :erlang.term_to_binary(identity, [:deterministic]))
+    key = {:bundle_v2, compiler, hashes}
     path = bundle_path(directory)
 
-    case read_bundle(path, key) do
-      {:ok, inventory, modules} ->
+    case read_bundle(path) do
+      {:ok, {^key, inventory, modules}} ->
         {inventory, %{instrument_cache_hits: length(modules), instrument_cache_misses: 0},
          modules}
 
-      :error ->
-        {inventory, stats, modules} = transform_all!(directory, candidates, identity, true)
+      previous ->
+        {inventory, stats, modules} =
+          rebuild_bundle!(directory, candidates, identity, key, previous)
+
         write_cached(path, {key, inventory, modules}, [])
         {inventory, stats, modules}
     end
+  end
+
+  defp rebuild_bundle!(
+         directory,
+         candidates,
+         identity,
+         {:bundle_v2, compiler, hashes},
+         {:ok, {{:bundle_v2, compiler, old_hashes}, inventory, modules}}
+       ) do
+    {retained, changed} =
+      Enum.split_with(candidates, fn {file, _} -> old_hashes[file] == hashes[file] end)
+
+    names = MapSet.new(retained, fn {_, module} -> module end)
+    kept = Enum.filter(modules, fn {module, _, _} -> MapSet.member?(names, module) end)
+    inventory = Map.take(inventory, Enum.map(names, &Atom.to_string/1))
+    {fresh, stats, binaries} = transform_all!(directory, changed, identity, true)
+    stats = Map.update!(stats, :instrument_cache_hits, &(&1 + length(kept)))
+    {Map.merge(inventory, fresh), stats, kept ++ binaries}
+  end
+
+  defp rebuild_bundle!(directory, candidates, identity, _key, _previous) do
+    transform_all!(directory, candidates, identity, true)
   end
 
   defp transform_all!(directory, candidates, identity, load?) do
@@ -120,16 +144,10 @@ defmodule Qlover.Coverage.Instrumenter do
     end)
   end
 
-  defp read_bundle(path, key) do
-    cached =
-      case :persistent_term.get(@warm, nil) do
-        {^path, {:ok, {^key, _, _}} = cached} -> cached
-        _ -> decode_bundle(path)
-      end
-
-    case cached do
-      {:ok, {^key, inventory, modules}} -> {:ok, inventory, modules}
-      _ -> :error
+  defp read_bundle(path) do
+    case :persistent_term.get(@warm, nil) do
+      {^path, {:ok, _} = cached} -> cached
+      _ -> decode_bundle(path)
     end
   end
 
@@ -139,7 +157,8 @@ defmodule Qlover.Coverage.Instrumenter do
   defp decode_bundle(path) do
     with {:ok, <<checksum::binary-size(32), payload::binary>>} <- File.read(path),
          true <- :crypto.hash(:sha256, payload) == checksum,
-         {key, inventory, modules} when is_binary(key) and is_map(inventory) and is_list(modules) <-
+         {{:bundle_v2, compiler, hashes} = key, inventory, modules}
+         when is_binary(compiler) and is_map(hashes) and is_map(inventory) and is_list(modules) <-
            :erlang.binary_to_term(payload, [:safe]) do
       {:ok, {key, inventory, modules}}
     else

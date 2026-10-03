@@ -126,7 +126,7 @@ defmodule Mix.Tasks.Test.Qlover do
     settings = Qlover.settings(options, flags)
     runner = Keyword.get(options, :test_runner, &default_runner/1)
 
-    Mix.Task.run("compile")
+    Elixir.Qlover.Native.compile()
     Elixir.Qlover.Inputs.start()
 
     try do

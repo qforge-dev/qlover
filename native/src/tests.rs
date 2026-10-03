@@ -7,6 +7,55 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn bulk_records_keep_binary_payloads_and_unreadable_entries() {
+    let dir = Directory::new();
+    fs::write(dir.0.join("b.term"), [0, 255, 131]).unwrap();
+    fs::write(dir.0.join("ignored.tmp"), "ignore").unwrap();
+    fs::create_dir(dir.0.join("a.term")).unwrap();
+    let mut bytes = Vec::new();
+    crate::files::records(&dir.0, &mut bytes).unwrap();
+    assert_eq!(&bytes[..4], &4_u32.to_be_bytes());
+    let mut input = Cursor::new(&bytes[4..]);
+    assert_eq!(protocol::read_bytes(&mut input).unwrap(), b"a.term");
+    assert!(protocol::read_bytes(&mut input).unwrap().is_empty());
+    assert_eq!(protocol::read_bytes(&mut input).unwrap(), b"b.term");
+    assert_eq!(protocol::read_bytes(&mut input).unwrap(), [0, 255, 131]);
+}
+
+#[test]
+fn native_file_hashes_preserve_relative_names_and_explicit_hidden_roots() {
+    let dir = Directory::new();
+    fs::create_dir_all(dir.0.join("test/nested")).unwrap();
+    fs::create_dir_all(dir.0.join("test/.hidden")).unwrap();
+    for name in [
+        "test/a.exs",
+        "test/nested/b.exs",
+        "test/.hidden/ignored.exs",
+    ] {
+        fs::write(dir.0.join(name), "abc").unwrap();
+    }
+    let root = dir.0.join("test").to_string_lossy().into_owned();
+    let values = crate::files::hashes(&[root.clone(), root], &dir.0).unwrap();
+    let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    assert_eq!(values, ["test/a.exs", sha, "test/nested/b.exs", sha]);
+    let hidden = dir
+        .0
+        .join("test/.hidden/ignored.exs")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        crate::files::hashes(&[hidden], &dir.0).unwrap(),
+        ["test/.hidden/ignored.exs", sha]
+    );
+    assert!(crate::files::hashes(
+        &[dir.0.join("missing").to_string_lossy().into_owned()],
+        &dir.0
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
 fn prewarming_preserves_custom_mix_wrappers_and_explicit_opt_out() {
     let dir = Directory::new();
     let path = dir.0.to_str().unwrap();
