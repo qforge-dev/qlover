@@ -133,11 +133,13 @@ defmodule Mix.Tasks.Test.Qlover do
       Elixir.Qlover.Native.prepare(settings)
 
       selection =
-        selection_plan(
-          settings,
-          flags,
-          runner == (&default_runner/1) and Elixir.Qlover.Coverage.attributed_supported?()
-        )
+        Elixir.Qlover.Native.measure(:selection, fn ->
+          selection_plan(
+            settings,
+            flags,
+            runner == (&default_runner/1) and Elixir.Qlover.Coverage.attributed_supported?()
+          )
+        end)
 
       if Keyword.get(flags, :dry, false) do
         print_dry_plan(selection, settings, test_args)

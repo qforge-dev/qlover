@@ -1,10 +1,30 @@
 use crate::{protocol, snapshot};
 use std::fs;
 use std::io::Cursor;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn prewarming_preserves_custom_mix_wrappers_and_explicit_opt_out() {
+    let dir = Directory::new();
+    let path = dir.0.to_str().unwrap();
+    let vars = [("PATH", path)];
+    assert!(!crate::worker::supported(&vars));
+    for name in ["mix", "elixir"] {
+        let file = dir.0.join(name);
+        fs::write(&file, "#!/usr/bin/env elixir\n# comment\nMix.CLI.main()\n").unwrap();
+        fs::set_permissions(file, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(crate::worker::supported(&vars));
+    assert!(!crate::worker::supported(&[
+        ("PATH", path),
+        ("QLOVER_PREWARM", "0")
+    ]));
+    fs::write(dir.0.join("mix"), "#!/bin/sh\nexec custom-mix \"$@\"\n").unwrap();
+    assert!(!crate::worker::supported(&vars));
+}
 
 #[test]
 fn fingerprint_memo_reuses_only_unchanged_entries_and_rejects_corruption() {

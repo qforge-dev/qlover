@@ -4,6 +4,7 @@ mod server;
 mod snapshot;
 #[cfg(test)]
 mod tests;
+mod worker;
 
 use std::env;
 use std::fs::{self, File};
@@ -41,8 +42,11 @@ fn run() -> io::Result<i32> {
         )?;
         return Ok(0);
     }
-    if args.first().map(String::as_str) == Some("--worker") {
-        return worker(&args[1..]);
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--worker" | "--warm-worker")
+    ) {
+        return worker::run(&args[1..], args[0] == "--warm-worker");
     }
     if args.first().map(String::as_str) == Some("--memo-restore") && args.len() == 3 {
         memo::restore(
@@ -95,24 +99,6 @@ fn run() -> io::Result<i32> {
         return receive(&mut connection);
     }
     Ok(code)
-}
-
-fn worker(args: &[String]) -> io::Result<i32> {
-    // A dedicated pipe ties the entire worker group to the coordinator's
-    // lifetime, including SIGKILL/crashes where no cleanup handler can run.
-    std::thread::spawn(|| {
-        let mut byte = [0];
-        let _ = io::stdin().read(&mut byte);
-        unsafe {
-            libc::kill(-(std::process::id() as i32), libc::SIGKILL);
-        }
-    });
-    let status = Command::new("mix")
-        .arg("test.qlover")
-        .args(args)
-        .stdin(Stdio::null())
-        .status()?;
-    Ok(status.code().unwrap_or(1))
 }
 
 pub fn revision() -> io::Result<String> {

@@ -59,6 +59,71 @@ defmodule Qlover.NativeTest do
     assert help =~ "Persistent native coordinator"
   end
 
+  test "prewarmed workers are single use and never retain test VM state", %{tmp_dir: dir} do
+    test = Path.join(dir, "test/example_test.exs")
+    original = File.read!(test)
+
+    for n <- 1..3 do
+      assertion = """
+      (assert(:persistent_term.get(:qlover_isolation, nil) == nil);
+       :persistent_term.put(:qlover_isolation, :dirty);
+       File.write!("worker-pids", System.pid() <> "\\n", [:append]);
+       assert(NativeFixture.value() == :ok))
+      """
+
+      File.write!(
+        test,
+        String.replace(original, "assert(NativeFixture.value() == :ok)", assertion) <>
+          "\n# #{n}\n"
+      )
+
+      {output, 0} = native(dir)
+      assert output =~ "ran 1 tests;"
+      if n > 1, do: assert(output =~ "using prewarmed isolated worker")
+    end
+
+    pids = dir |> Path.join("worker-pids") |> File.read!() |> String.split()
+    assert length(Enum.uniq(pids)) == 3
+  end
+
+  test "a dead spare falls back to a fresh worker", %{tmp_dir: dir} do
+    assert {_, 0} = native(dir)
+    {status, 0} = native(dir, ["--status"])
+    [_, pid] = Regex.run(~r/spare worker: Some\((\d+)\)/, status)
+    assert {_, 0} = System.cmd("kill", ["-KILL", pid])
+    test = Path.join(dir, "test/example_test.exs")
+    File.write!(test, File.read!(test) <> "\n# changed\n")
+    {output, 0} = native(dir)
+    refute output =~ "using prewarmed isolated worker"
+    assert output =~ "ran 1 tests;"
+  end
+
+  test "prewarming can be disabled", %{tmp_dir: dir} do
+    for _ <- 1..2 do
+      {output, 0} = native(dir, ["--no-stale"], [{"QLOVER_PREWARM", "0"}])
+      refute output =~ "using prewarmed isolated worker"
+    end
+
+    {status, 0} = native(dir, ["--status"])
+    assert status =~ "spare worker: None"
+  end
+
+  test "preloaded evidence cannot hide a baseline changed after prewarming", %{tmp_dir: dir} do
+    assert {_, 0} = native(dir)
+    File.rm_rf!(Path.join(dir, "cache"))
+    project = Path.join(dir, "mix.exs")
+
+    File.write!(
+      project,
+      File.read!(project) <> "\nFile.write!(\"cover/.qlover_baseline\", \"corrupt\")\n"
+    )
+
+    {output, 0} = native(dir)
+    assert output =~ "using prewarmed isolated worker"
+    assert output =~ "baseline missing/invalid"
+    assert output =~ "ran 1 tests;"
+  end
+
   test "idle expiry and explicit shutdown allow a clean restart", %{tmp_dir: dir} do
     env = [{"QLOVER_IDLE_TIMEOUT", "1"}]
     assert {_, 0} = native(dir, [], env)
@@ -226,6 +291,7 @@ defmodule Qlover.NativeTest do
     assert {_, 0} = native(dir)
     {different, 0} = native(dir, [], [{"QLOVER_NATIVE_TEST_ENV", "changed"}])
     refute different =~ "reusing verified coverage (daemon)"
+    refute different =~ "using prewarmed isolated worker"
     File.rm!(Path.join(dir, "cover/.qlover_baseline"))
     {missing, 0} = native(dir)
     refute missing =~ "reusing verified coverage (daemon)"

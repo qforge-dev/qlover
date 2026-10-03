@@ -3,22 +3,88 @@ defmodule Qlover.Native do
   require Mix.Compilers.Elixir, as: Compiler
   @continuation {__MODULE__, :continuation}
   @inputs {__MODULE__, :inputs}
+  @warm {__MODULE__, :warm}
+
+  def measure(stage, fun) do
+    if System.get_env("QLOVER_TIMINGS") == "1" do
+      start = System.monotonic_time(:microsecond)
+
+      try do
+        fun.()
+      after
+        elapsed = System.monotonic_time(:microsecond) - start
+        IO.puts(:stderr, "qlover timing #{stage}: #{elapsed}us")
+      end
+    else
+      fun.()
+    end
+  end
+
+  def prewarm do
+    path = System.fetch_env!("QLOVER_RECEIPT")
+    [_code, baseline, beams] = read_strings(File.read!(path <> ".preload"))
+    Qlover.Inputs.start()
+    Mix.Tasks.Qlover.read_baseline!(baseline)
+    :persistent_term.put(@warm, Qlover.Inputs.snapshot())
+    Qlover.Coverage.Instrumenter.prewarm(beams)
+  rescue
+    _ -> :ok
+  after
+    Qlover.Inputs.stop()
+  end
+
+  def memo_input(key, fun) do
+    case :persistent_term.get(@inputs, nil) do
+      nil ->
+        Qlover.Inputs.fetch(key, fun)
+
+      inputs ->
+        case Map.fetch(inputs, key) do
+          {:ok, value} ->
+            value
+
+          :error ->
+            value = fun.()
+            :persistent_term.put(@inputs, Map.put(inputs, key, value))
+            value
+        end
+    end
+  end
 
   def prepare(settings) do
     Process.delete({__MODULE__, :gate})
 
     if path = System.get_env("QLOVER_RECEIPT") do
-      roots = input_roots(settings)
+      roots = measure(:input_roots, fn -> input_roots(settings) end)
       write_strings(path <> ".roots", roots)
+      code = Path.dirname(to_string(:code.which(__MODULE__))) |> Path.expand()
+      source = Mix.Project.deps_paths()[:qlover] || settings.project_root
+      warm_roots = [code, Path.join(source, "lib"), Path.join(source, "mix.exs")]
 
-      {_, 0} =
-        System.cmd(System.fetch_env!("QLOVER_CLIENT"), [
-          "--prepare",
-          path <> ".roots",
-          path
-        ])
+      write_strings(
+        path <> ".toolchain",
+        toolchain_inputs() ++ warm_roots ++ runtime_inputs()
+      )
 
-      restore_memo(path)
+      write_strings(path <> ".preload", [
+        code,
+        Path.expand(settings.baseline),
+        Path.expand(settings.compile_path)
+      ])
+
+      measure(:fingerprint_restore, fn ->
+        {_, 0} =
+          System.cmd(System.fetch_env!("QLOVER_CLIENT"), [
+            "--prepare",
+            path <> ".roots",
+            path
+          ])
+
+        restore_memo(path)
+      end)
+
+      Qlover.Inputs.restore(Map.merge(:persistent_term.get(@warm, %{}), Qlover.Inputs.snapshot()))
+      :persistent_term.erase(@warm)
     end
   end
 
@@ -46,7 +112,10 @@ defmodule Qlover.Native do
     # Registered before test helpers: their exit callbacks must succeed before
     # any baseline is committed, just as with the isolated child runner.
     System.at_exit(fn status -> complete(status, paths) end)
-    :persistent_term.put(@inputs, Qlover.Inputs.snapshot())
+    # Compiler reference records are outputs of test-file compilation. Unlike
+    # the verified source fingerprints, these cannot cross the test boundary.
+    inputs = Map.reject(Qlover.Inputs.snapshot(), fn {key, _} -> match?({:records, _}, key) end)
+    :persistent_term.put(@inputs, inputs)
     Qlover.Inputs.stop()
     Qlover.TestCounts.install(base)
     project = Mix.Project.config()
@@ -70,7 +139,7 @@ defmodule Qlover.Native do
     try do
       case :persistent_term.get(@continuation, nil) do
         nil -> :ok
-        callback -> callback.(status)
+        callback -> measure(:finalize, fn -> callback.(status) end)
       end
     after
       :persistent_term.erase(@continuation)
@@ -100,7 +169,7 @@ defmodule Qlover.Native do
         Path.expand(settings.output)
       ])
 
-      write_memo(path, settings)
+      measure(:memo_export, fn -> write_memo(path, settings) end)
     end
   end
 
@@ -140,6 +209,7 @@ defmodule Qlover.Native do
   end
 
   defp memo_roots({:beams, dir}, _), do: [dir]
+  defp memo_roots({:raw_beams, dir}, _), do: [dir]
   defp memo_roots({:sources, dir}, settings), do: [dir | settings.elixirc_paths]
   defp memo_roots({:dependencies, dir}, _), do: [dir |> Path.dirname() |> Path.dirname()]
   defp memo_roots({:tests, paths, _}, _), do: paths
@@ -220,6 +290,14 @@ defmodule Qlover.Native do
     (commands ++
        libraries ++ [to_string(:code.which(:sys_coverage)), to_string(:code.which(:compile))])
     |> Enum.filter(&is_binary/1)
+  end
+
+  defp runtime_inputs do
+    root = to_string(:code.root_dir())
+
+    Path.wildcard(Path.join(root, "lib/*/ebin")) ++
+      Path.wildcard(Path.join(root, "erts-*/bin")) ++
+      [Path.join(root, "bin"), Path.join(root, "releases/start_erl.data")]
   end
 
   defp write_strings(path, strings) do

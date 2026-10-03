@@ -48,7 +48,12 @@ defmodule Qlover.Coverage do
   def start(compile_path, opts) do
     Mix.shell().info("Instrumenting attributed coverage ...")
     Code.ensure_loaded!(ExUnit.Runner)
-    beams = Mix.Tasks.Qlover.beam_hashes(compile_path)
+
+    beams =
+      Qlover.Native.memo_input({:beams, compile_path}, fn ->
+        Mix.Tasks.Qlover.beam_hashes(compile_path)
+      end)
+
     instrument_started = System.monotonic_time(:microsecond)
 
     {inventory, instrument_stats} =

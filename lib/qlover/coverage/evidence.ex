@@ -213,16 +213,19 @@ defmodule Qlover.Coverage.Evidence do
         else:
           previous.suite |> Map.take(current_modules) |> Map.drop(MapSet.to_list(changed_names))
 
+    removed = Map.keys(previous.inventory) -- Map.keys(inventory)
+    invalidated = MapSet.to_list(changed_names) ++ removed
+    rerun = MapSet.new(plan.run)
+
     # Every rerun replaces the entire row. A deleted row cannot retain any
     # historical hits; untouched rows are valid only for the same module map.
     rows =
       previous.rows
       |> Map.filter(fn {file, %{sha: sha}} ->
-        hashes[file] == sha and MapSet.member?(runnable, file) and file not in plan.run
+        hashes[file] == sha and MapSet.member?(runnable, file) and not MapSet.member?(rerun, file)
       end)
       |> Map.new(fn {file, row} ->
-        removed = Map.keys(row.hits) -- Map.keys(inventory)
-        {file, %{row | hits: Map.drop(row.hits, MapSet.to_list(changed_names) ++ removed)}}
+        {file, %{row | hits: Map.drop(row.hits, invalidated)}}
       end)
 
     rows =

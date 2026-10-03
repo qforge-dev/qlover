@@ -1,5 +1,27 @@
 defmodule Qlover.Coverage.Instrumenter do
   @moduledoc false
+  @warm {__MODULE__, :warm}
+  @prepared {__MODULE__, :prepared}
+
+  def prewarm(directory) do
+    # Intern only names present in this project's BEAM directory. The bundle
+    # still needs its exact input key checked after the next compilation.
+    for file <- File.ls!(directory), String.ends_with?(file, ".beam") do
+      file |> Path.rootname() |> String.to_atom()
+    end
+
+    path = bundle_path(directory)
+    bundle = decode_bundle(path)
+    :persistent_term.put(@warm, {path, bundle})
+
+    case bundle do
+      {:ok, {_key, _inventory, modules}} ->
+        :persistent_term.put(@prepared, {modules, :code.prepare_loading(modules)})
+
+      _ ->
+        :ok
+    end
+  end
 
   # sys_coverage is the same (undocumented) executable-line transform used by
   # OTP cover. Fail closed if its representation changes.
@@ -31,33 +53,100 @@ defmodule Qlover.Coverage.Instrumenter do
       {File.cwd!(), System.version(), :erlang.system_info(:version), :compile.module_info(:md5),
        :sys_coverage.module_info(:md5), __MODULE__.module_info(:md5)}
 
-    {inventory, stats, modules} =
+    candidates =
       files
       |> Enum.sort()
       |> Enum.map(fn file -> {file, file |> Path.rootname() |> String.to_atom()} end)
       |> Enum.reject(fn {_, module} ->
         module in [Qlover.Coverage.Runtime, __MODULE__] or ignored?(module, ignores)
       end)
-      |> Task.async_stream(
-        fn {file, module} -> artifact!(directory, file, module, identity, load?) end,
-        max_concurrency: min(System.schedulers_online(), 8),
-        ordered: false,
-        timeout: :infinity
-      )
-      |> Enum.reduce({%{}, %{instrument_cache_hits: 0, instrument_cache_misses: 0}, []}, fn
-        {:ok, {module, inventory, binary, cached?}}, {acc, stats, modules} ->
-          counter = if cached?, do: :instrument_cache_hits, else: :instrument_cache_misses
 
-          {Map.put(acc, Atom.to_string(module), inventory),
-           Map.update!(stats, counter, &(&1 + 1)),
-           [{module, ~c"qlover_instrumented", binary} | modules]}
-
-        {:exit, reason}, _ ->
-          exit(reason)
+    {inventory, stats, modules} =
+      Qlover.Native.measure(:instrument_artifacts, fn ->
+        artifacts!(directory, candidates, identity, load?)
       end)
 
-    if load?, do: load_batch!(modules)
+    if load?, do: Qlover.Native.measure(:instrument_load, fn -> load_batch!(modules) end)
     {inventory, stats}
+  end
+
+  defp artifacts!(directory, candidates, identity, false) do
+    transform_all!(directory, candidates, identity, false)
+  end
+
+  defp artifacts!(directory, candidates, identity, true) do
+    raw =
+      Qlover.Native.memo_input({:raw_beams, directory}, fn ->
+        for file <- File.ls!(directory),
+            String.ends_with?(file, ".beam"),
+            into: %{},
+            do: {file, :crypto.hash(:sha256, File.read!(Path.join(directory, file)))}
+      end)
+
+    hashes = Enum.map(candidates, fn {file, _} -> {file, Map.fetch!(raw, file)} end)
+
+    key = :crypto.hash(:sha256, :erlang.term_to_binary({identity, hashes}, [:deterministic]))
+    path = bundle_path(directory)
+
+    case read_bundle(path, key) do
+      {:ok, inventory, modules} ->
+        {inventory, %{instrument_cache_hits: length(modules), instrument_cache_misses: 0},
+         modules}
+
+      :error ->
+        {inventory, stats, modules} = transform_all!(directory, candidates, identity, true)
+        write_cached(path, {key, inventory, modules}, [])
+        {inventory, stats, modules}
+    end
+  end
+
+  defp transform_all!(directory, candidates, identity, load?) do
+    candidates
+    |> Task.async_stream(
+      fn {file, module} -> artifact!(directory, file, module, identity, load?) end,
+      max_concurrency: min(System.schedulers_online(), 8),
+      ordered: false,
+      timeout: :infinity
+    )
+    |> Enum.reduce({%{}, %{instrument_cache_hits: 0, instrument_cache_misses: 0}, []}, fn
+      {:ok, {module, inventory, binary, cached?}}, {acc, stats, modules} ->
+        counter = if cached?, do: :instrument_cache_hits, else: :instrument_cache_misses
+
+        {Map.put(acc, Atom.to_string(module), inventory), Map.update!(stats, counter, &(&1 + 1)),
+         [{module, ~c"qlover_instrumented", binary} | modules]}
+
+      {:exit, reason}, _ ->
+        exit(reason)
+    end)
+  end
+
+  defp read_bundle(path, key) do
+    cached =
+      case :persistent_term.get(@warm, nil) do
+        {^path, {:ok, {^key, _, _}} = cached} -> cached
+        _ -> decode_bundle(path)
+      end
+
+    case cached do
+      {:ok, {^key, inventory, modules}} -> {:ok, inventory, modules}
+      _ -> :error
+    end
+  end
+
+  defp bundle_path(directory),
+    do: Path.join([Path.dirname(directory), ".mix", "qlover_instrumented", "bundle"])
+
+  defp decode_bundle(path) do
+    with {:ok, <<checksum::binary-size(32), payload::binary>>} <- File.read(path),
+         true <- :crypto.hash(:sha256, payload) == checksum,
+         {key, inventory, modules} when is_binary(key) and is_map(inventory) and is_list(modules) <-
+           :erlang.binary_to_term(payload, [:safe]) do
+      {:ok, {key, inventory, modules}}
+    else
+      _ -> :error
+    end
+  rescue
+    _ -> :error
   end
 
   defp artifact!(directory, file, module, identity, load?) do
@@ -157,8 +246,8 @@ defmodule Qlover.Coverage.Instrumenter do
     _ -> :error
   end
 
-  defp write_cached(path, artifact) do
-    payload = :erlang.term_to_binary(artifact, [:compressed])
+  defp write_cached(path, artifact, options \\ [:compressed]) do
+    payload = :erlang.term_to_binary(artifact, options)
     temp = path <> ".#{System.pid()}-#{System.unique_integer([:positive])}.tmp"
 
     try do
@@ -179,7 +268,17 @@ defmodule Qlover.Coverage.Instrumenter do
   end
 
   defp load_batch!(modules) do
-    case :code.atomic_load(modules) do
+    result =
+      case :persistent_term.get(@prepared, nil) do
+        {^modules, {:ok, prepared}} ->
+          :persistent_term.erase(@prepared)
+          :code.finish_loading(prepared)
+
+        _ ->
+          :code.atomic_load(modules)
+      end
+
+    case result do
       :ok ->
         :ok
 

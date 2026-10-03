@@ -291,7 +291,11 @@ defmodule Mix.Tasks.Qlover do
             gate
           )
 
-        evidence = Elixir.Qlover.Coverage.Evidence.advance!(settings, baseline, plan)
+        evidence =
+          Elixir.Qlover.Native.measure(:evidence_merge, fn ->
+            Elixir.Qlover.Coverage.Evidence.advance!(settings, baseline, plan)
+          end)
+
         snapshot = Map.put(snapshot, :attributed, evidence)
         write_snapshot_if_changed!(settings, baseline, snapshot)
         prune_records!(settings, snapshot, current)
@@ -681,16 +685,17 @@ defmodule Mix.Tasks.Qlover do
 
     # Counts are optional metadata, independent of the coverage proof. Keep
     # them in the shared baseline so unchanged checkouts can report savings.
-    prior =
-      with {:ok, bytes} <- File.read(settings.baseline),
-           {:ok, baseline} <- decode_baseline(bytes) do
-        baseline
-      else
-        _ -> %{}
-      end
-
-    counts = settings.test_counts || Map.get(prior, :test_counts)
+    counts = settings.test_counts || prior_counts(settings.baseline)
     if counts, do: Map.put(snapshot, :test_counts, counts), else: snapshot
+  end
+
+  defp prior_counts(path) do
+    with {:ok, bytes} <- File.read(path),
+         {:ok, baseline} <- decode_baseline(bytes) do
+      Map.get(baseline, :test_counts)
+    else
+      _ -> nil
+    end
   end
 
   defp read_prior_baseline(settings) do
@@ -711,7 +716,10 @@ defmodule Mix.Tasks.Qlover do
   end
 
   defp persist_baseline!(settings, snapshot) do
-    write_baseline_file!(settings.baseline, snapshot)
+    Elixir.Qlover.Native.measure(:baseline_write, fn ->
+      write_baseline_file!(settings.baseline, snapshot)
+    end)
+
     store_cached_baseline(settings, snapshot)
     sync_cached_records(settings)
     :ok
@@ -828,6 +836,10 @@ defmodule Mix.Tasks.Qlover do
   end
 
   defp list_record_entries(refs_dir) do
+    Elixir.Qlover.Inputs.fetch({:records, refs_dir}, fn -> read_record_entries(refs_dir) end)
+  end
+
+  defp read_record_entries(refs_dir) do
     case File.ls(refs_dir) do
       {:ok, entries} ->
         entries
@@ -871,6 +883,15 @@ defmodule Mix.Tasks.Qlover do
   end
 
   defp decode_baseline(contents) do
+    # Content-addressed even within a request: a test replacing the baseline
+    # must never inherit a validation result for the previous bytes.
+    validators = [__MODULE__, Attribution, Elixir.Qlover.Coverage.Evidence, Qlover.TestCounts]
+    identity = Enum.map(validators, & &1.module_info(:md5))
+    key = {:baseline, :crypto.hash(:sha256, contents), identity}
+    Elixir.Qlover.Inputs.fetch(key, fn -> validate_baseline(contents) end)
+  end
+
+  defp validate_baseline(contents) do
     case decode_term(contents) do
       %{vsn: @vsn, beams: beams, gate: gate, tests: tests, librefs: librefs} = baseline
       when is_map(beams) and is_binary(gate) ->
@@ -965,7 +986,7 @@ defmodule Mix.Tasks.Qlover do
   defp write_baseline_file!(path, baseline) do
     File.mkdir_p!(Path.dirname(path))
     temp = path <> ".#{System.pid()}-#{System.unique_integer([:positive])}.tmp"
-    File.write!(temp, :erlang.term_to_binary(baseline, [:compressed]))
+    File.write!(temp, :erlang.term_to_binary(baseline, [{:compressed, 1}]))
     File.rename!(temp, path)
   end
 end

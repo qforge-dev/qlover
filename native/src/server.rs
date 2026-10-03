@@ -1,12 +1,10 @@
-use crate::{protocol, snapshot};
+use crate::{protocol, snapshot, worker};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
@@ -21,6 +19,13 @@ struct Cached {
     code: i32,
 }
 
+struct Spare {
+    worker: worker::Worker,
+    request: Vec<String>,
+    roots: Vec<String>,
+    snapshot: Vec<u8>,
+}
+
 type Arguments<'a> = (&'a [String], Vec<(&'a str, &'a str)>);
 
 struct State {
@@ -29,6 +34,7 @@ struct State {
     stopped: AtomicBool,
     touched: Mutex<Instant>,
     child: Mutex<Option<u32>>,
+    spare: Mutex<Option<Spare>>,
     directory: PathBuf,
     project: String,
     revision: String,
@@ -54,6 +60,7 @@ pub fn serve(directory: &Path) -> io::Result<i32> {
         stopped: AtomicBool::new(false),
         touched: Mutex::new(Instant::now()),
         child: Mutex::new(None),
+        spare: Mutex::new(None),
         directory: directory.into(),
         project: env::current_dir()?.to_string_lossy().into_owned(),
         revision: crate::revision()?,
@@ -64,6 +71,7 @@ pub fn serve(directory: &Path) -> io::Result<i32> {
         .unwrap_or(600);
     listen(&listener, &state, Duration::from_secs(timeout))?;
     terminate(&state.child);
+    state.spare.lock().unwrap().take();
     let _ = fs::remove_file(socket);
     Ok(0)
 }
@@ -109,14 +117,18 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> io::Result<()> {
     if args == ["--stop"] {
         state.stopped.store(true, Ordering::SeqCst);
         terminate(&state.child);
+        state.spare.lock().unwrap().take();
         protocol::event(&mut stream, 1, b"qlover: daemon stopped\n")?;
         return protocol::event(&mut stream, 3, &0_i32.to_be_bytes());
     }
     if args == ["--status"] {
+        let spare = state.spare.lock().unwrap();
+        let pid = spare.as_ref().map(|s| s.worker.child.id());
         let msg = format!(
-            "qlover: daemon {} for {}\n",
+            "qlover: daemon {} for {} (spare worker: {:?})\n",
             std::process::id(),
-            state.project
+            state.project,
+            pid
         );
         protocol::event(&mut stream, 1, msg.as_bytes())?;
         return protocol::event(&mut stream, 3, &0_i32.to_be_bytes());
@@ -149,15 +161,18 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> io::Result<()> {
         let _ = fs::remove_file(state.directory.join("receipt.memo"));
     }
     *cached = None;
-    let code = execute(&mut stream, state, args, &vars)?;
+    let code = execute(&mut stream, state, &request, args, &vars)?;
     if !args.iter().any(|s| s == "--no-stale" || s == "--dry") {
-        *cached = match cache_result(state, request, code) {
+        *cached = match cache_result(state, request.clone(), code) {
             Ok(entry) => Some(entry),
             Err(e) => {
                 eprintln!("cache not retained: {e}");
                 None
             }
         };
+    }
+    if let Err(e) = replenish(state, request.clone(), args, &vars) {
+        eprintln!("worker not prewarmed: {e}");
     }
     protocol::event(&mut stream, 3, &code.to_be_bytes())
 }
@@ -186,6 +201,7 @@ fn parse<'a>(request: &'a [String], project: &str) -> io::Result<Arguments<'a>> 
 fn execute(
     stream: &mut UnixStream,
     state: &Arc<State>,
+    request: &[String],
     args: &[String],
     vars: &[(&str, &str)],
 ) -> io::Result<i32> {
@@ -193,22 +209,14 @@ fn execute(
     for suffix in ["", ".before", ".roots"] {
         let _ = fs::remove_file(format!("{}{suffix}", receipt.display()));
     }
-    let mut child = Command::new(env::current_exe()?)
-        .arg("--worker")
-        .args(args)
-        .current_dir(&state.project)
-        .env_clear()
-        .envs(vars.iter().copied())
-        .env("MIX_ENV", "test")
-        .env("QLOVER_IN_PROCESS", "1")
-        .env("QLOVER_RECEIPT", &receipt)
-        .env("QLOVER_CLIENT", env::current_exe()?)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()?;
-    let _heartbeat = child.stdin.take();
+    let mut worker = match take_spare(state, request) {
+        Some(worker) => {
+            protocol::event(stream, 1, b"qlover: using prewarmed isolated worker.\n")?;
+            worker
+        }
+        _ => worker::Worker::spawn(&state.project, &receipt, args, vars, false)?,
+    };
+    let child = &mut worker.child;
     *state.child.lock().unwrap() = Some(child.id());
     let socket = Arc::new(Mutex::new(stream.try_clone()?));
     let out = pump(child.stdout.take().unwrap(), Arc::clone(&socket), 1);
@@ -216,11 +224,51 @@ fn execute(
     let done = Arc::new(AtomicBool::new(false));
     monitor(stream.try_clone()?, Arc::clone(state), Arc::clone(&done));
     let status = child.wait()?;
+    // A killed guardian or a port surviving BEAM shutdown must not keep the
+    // output pipes (or the project queue) open indefinitely.
+    worker::kill_group(child.id());
     done.store(true, Ordering::SeqCst);
     *state.child.lock().unwrap() = None;
     out.join().unwrap()?;
     err.join().unwrap()?;
     Ok(status.code().unwrap_or(1))
+}
+
+fn take_spare(state: &State, request: &[String]) -> Option<worker::Worker> {
+    let mut spare = state.spare.lock().unwrap().take()?;
+    if spare.request == request
+        && snapshot::capture(&spare.roots).ok()? == spare.snapshot
+        && spare.worker.child.try_wait().ok()?.is_none()
+        && spare.worker.activate().is_ok()
+    {
+        Some(spare.worker)
+    } else {
+        None
+    }
+}
+
+fn replenish(
+    state: &State,
+    request: Vec<String>,
+    args: &[String],
+    vars: &[(&str, &str)],
+) -> io::Result<()> {
+    if !worker::supported(vars) || state.stopped.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let receipt = state.directory.join("receipt");
+    let roots = protocol::read_strings(&mut File::open(receipt.with_extension("toolchain"))?)?;
+    let snapshot = snapshot::capture(&roots)?;
+    let mut spare = state.spare.lock().unwrap();
+    if !state.stopped.load(Ordering::SeqCst) {
+        *spare = Some(Spare {
+            worker: worker::Worker::spawn(&state.project, &receipt, args, vars, true)?,
+            request,
+            roots,
+            snapshot,
+        });
+    }
+    Ok(())
 }
 
 fn pump(
