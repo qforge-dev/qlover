@@ -170,7 +170,10 @@ defmodule Qlover.Coverage.Runtime do
       nil ->
         case state.parents[pid] do
           nil -> nil
-          {_parent, inherited} -> inherited
+          # Traces from different processes can arrive out of spawn order. Keep
+          # the loading-time owner when known; otherwise resolve ancestry once
+          # the trace stream has drained instead of freezing a missing owner.
+          {parent, inherited} -> inherited || execution_owner(parent, state)
         end
 
       file ->
